@@ -14,6 +14,7 @@ import { noopRateLimiter, type RateLimiter } from '../ratelimit/limiter.js';
 import { worstCaseCostMicros, type BudgetService, type Reservation } from '../budget/service.js';
 import { estimatePromptTokens } from '../routing/tokens.js';
 import { flagEnabled, type FlagDefaults } from '../flags.js';
+import { inSpan, inSpanSync } from '../observability/tracing.js';
 import { noopRecorder, type UsageRecorder } from '../metering/recorder.js';
 import { sendStream, type StreamOptions, type StreamStatus } from './stream.js';
 
@@ -38,6 +39,8 @@ export type ChatRouteDeps = {
   rateLimiter?: RateLimiter;
   budgets?: BudgetService;
   flags?: FlagDefaults;
+  /** Development only: log prompts at debug level (see promptLoggingAllowed). */
+  logPrompts?: boolean;
 };
 
 /**
@@ -130,7 +133,9 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       const deadlineAt = Date.now() + deadlineMs;
       reply.header('x-gateway-deadline-ms', String(deadlineMs));
 
-      const parsed = chatCompletionRequestSchema.safeParse(request.body);
+      const parsed = inSpanSync('validate', {}, () =>
+        chatCompletionRequestSchema.safeParse(request.body),
+      );
       if (!parsed.success) {
         throw new GatewayError(
           400,
@@ -140,6 +145,10 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         );
       }
       const body = parsed.data;
+      if (deps.logPrompts) {
+        // Development-only debugging aid; the key is deliberately outside the redaction paths.
+        request.log.debug({ debug_prompt: body.messages }, 'prompt (LOG_PROMPTS is on)');
+      }
       if (request.body && typeof request.body === 'object') {
         const ignored = Object.keys(request.body).filter((k) => !knownRequestFields.has(k));
         if (ignored.length) request.log.debug({ ignored }, 'ignoring unknown request fields');
@@ -151,28 +160,37 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       });
 
       const auth = request.auth!;
-      const plan = await planCandidates({
-        request: body,
-        registry: deps.providers,
-        ...(deps.catalog ? { catalog: deps.catalog } : {}),
-        credentials: deps.credentials,
-        tenantId: auth.tenantId,
-        tenantSettings: auth.tenantSettings,
-        costAware: flagEnabled('ff_cost_aware_routing', flags, auth.tenantSettings),
-        at: startedAt,
+      const plan = await inSpan('route', { 'gen_ai.request.model': body.model }, async (span) => {
+        const result = await planCandidates({
+          request: body,
+          registry: deps.providers,
+          ...(deps.catalog ? { catalog: deps.catalog } : {}),
+          credentials: deps.credentials,
+          tenantId: auth.tenantId,
+          tenantSettings: auth.tenantSettings,
+          costAware: flagEnabled('ff_cost_aware_routing', flags, auth.tenantSettings),
+          at: startedAt,
+        });
+        span.setAttributes({
+          'gateway.route_reason': result.routeReason,
+          'gateway.candidates': result.candidates.map((c) => c.id).join(','),
+        });
+        return result;
       });
       reply.header('x-gateway-route-reason', plan.routeReason);
       if (plan.skipped.length)
         request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
-      const admission = await rateLimiter.admit({
-        keyId: auth.keyId,
-        tenantId: auth.tenantId,
-        limits: auth.limits,
-        estimatedTokens:
-          estimatePromptTokens(body, plan.candidates[0]!.provider) +
-          (body.max_tokens ?? DEFAULT_OUTPUT_TOKEN_ESTIMATE),
-      });
+      const admission = await inSpan('ratelimit', {}, () =>
+        rateLimiter.admit({
+          keyId: auth.keyId,
+          tenantId: auth.tenantId,
+          limits: auth.limits,
+          estimatedTokens:
+            estimatePromptTokens(body, plan.candidates[0]!.provider) +
+            (body.max_tokens ?? DEFAULT_OUTPUT_TOKEN_ESTIMATE),
+        }),
+      );
       reply.headers(admission.headers);
 
       // Rate limit tokens and budget reservations are settled exactly once: with actual usage when
@@ -185,19 +203,28 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         settled = true;
         const billed = outcome.usage;
         void rateLimiter.settle(admission, billed ? billed.inputTokens + billed.outputTokens : 0);
+        request.telemetry.servedModel = outcome.model.id;
+        request.telemetry.attempts = outcome.attempts.length;
         try {
-          const event = buildUsageEvent({
-            ...outcome,
-            requestId: request.id,
-            tenantId: auth.tenantId,
-            apiKeyId: auth.keyId,
-            requestedModel: body.model,
-            firstCandidateId: plan.candidates[0]!.id,
-            startedAt,
-            finishedAt: new Date(),
-            routeReason: plan.routeReason,
-          });
-          void budgets?.settle(reservation, BigInt(event.costMicros));
+          const event = inSpanSync('meter', {}, () =>
+            buildUsageEvent({
+              ...outcome,
+              requestId: request.id,
+              tenantId: auth.tenantId,
+              apiKeyId: auth.keyId,
+              requestedModel: body.model,
+              firstCandidateId: plan.candidates[0]!.id,
+              startedAt,
+              finishedAt: new Date(),
+              routeReason: plan.routeReason,
+            }),
+          );
+          request.telemetry.costMicros = BigInt(event.costMicros);
+          if (budgets) {
+            void inSpan('budget.settle', {}, () =>
+              budgets.settle(reservation, BigInt(event.costMicros)),
+            );
+          }
           usage.record(event);
         } catch (err) {
           void budgets?.settle(reservation, 0n);
@@ -206,13 +233,16 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       };
 
       try {
-        reservation =
-          (await budgets?.reserve({
-            requestId: request.id,
-            tenantId: auth.tenantId,
-            at: startedAt,
-            amountMicros: worstCaseCostMicros(body, plan.candidates[0]!, startedAt),
-          })) ?? null;
+        if (budgets) {
+          reservation = await inSpan('budget.reserve', {}, () =>
+            budgets.reserve({
+              requestId: request.id,
+              tenantId: auth.tenantId,
+              at: startedAt,
+              amountMicros: worstCaseCostMicros(body, plan.candidates[0]!, startedAt),
+            }),
+          );
+        }
         // Falling back to a pricier model first reserves the difference (402 if it does not fit).
         const hooks = {
           beforeCandidate: (candidate: Candidate) =>
@@ -230,23 +260,34 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             hooks,
           );
           const ttftMs = Date.now() - startedAt.getTime();
-          const outcome = await sendStream({
-            request,
-            reply,
-            stream,
-            headers: {
-              'x-gateway-provider': stream.served.provider,
-              'x-gateway-model': stream.served.id,
-              'x-gateway-attempts': String(stream.attempts.length),
-              'x-gateway-deadline-ms': String(deadlineMs),
-              'x-gateway-route-reason': plan.routeReason,
-              ...admission.headers,
-            },
-            includeUsage: body.stream_options?.include_usage === true,
-            promptEstimate: estimateTokens(JSON.stringify(body.messages)),
-            clientSignal: client.signal,
-            options: streamOptions,
-          });
+          const outcome = await inSpan('stream', { 'gen_ai.system': stream.served.provider }, () =>
+            sendStream({
+              request,
+              reply,
+              stream,
+              headers: {
+                'x-gateway-provider': stream.served.provider,
+                'x-gateway-model': stream.served.id,
+                'x-gateway-attempts': String(stream.attempts.length),
+                'x-gateway-deadline-ms': String(deadlineMs),
+                'x-gateway-route-reason': plan.routeReason,
+                ...admission.headers,
+              },
+              includeUsage: body.stream_options?.include_usage === true,
+              promptEstimate: estimateTokens(JSON.stringify(body.messages)),
+              clientSignal: client.signal,
+              options: streamOptions,
+              // Metered before the response ends, so the access log line and root span see the cost.
+              beforeEnd: (result) =>
+                meter({
+                  status: streamStatus[result.status],
+                  model: stream.served,
+                  attempts: stream.attempts,
+                  usage: result.usage,
+                  ttftMs,
+                }),
+            }),
+          );
           request.log.info(
             {
               status: outcome.status,
@@ -256,13 +297,6 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             },
             'stream finished',
           );
-          meter({
-            status: streamStatus[outcome.status],
-            model: stream.served,
-            attempts: stream.attempts,
-            usage: outcome.usage,
-            ttftMs,
-          });
           return reply;
         }
 

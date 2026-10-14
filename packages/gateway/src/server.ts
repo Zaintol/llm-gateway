@@ -1,4 +1,6 @@
 import { ConfigError, loadConfig, type Config } from './config.js';
+import { promptLoggingAllowed } from './observability/logging.js';
+import { initTracing } from './observability/tracing.js';
 import { buildApp } from './app.js';
 import { Authenticator } from './auth/authenticator.js';
 import { RedisFailureLimiter } from './auth/failure-limiter.js';
@@ -37,6 +39,15 @@ function readConfig(): Config {
 }
 
 const config = readConfig();
+// Tracing must be registered before any request is served; spans are no-ops without an endpoint.
+const tracing = config.OTEL_EXPORTER_OTLP_ENDPOINT
+  ? initTracing({
+      serviceName: 'llm-gateway',
+      endpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+      sampleRatio: config.OTEL_TRACES_SAMPLE_RATIO,
+    })
+  : undefined;
+const logPrompts = promptLoggingAllowed(config.LOG_PROMPTS, config.NODE_ENV);
 const pool = createPool(config.DATABASE_URL);
 const db = createDb(pool);
 const redis = createRedis(config.REDIS_URL);
@@ -122,6 +133,7 @@ const app = buildApp({
       },
       usage: usageRecorder,
       budgets: budgetService,
+      logPrompts,
       flags: { ff_cost_aware_routing: config.FF_COST_AWARE_ROUTING },
       rateLimiter: new RedisRateLimiter(redis, (err) =>
         app.log.warn({ err }, 'rate limiter unavailable; admitting requests without limits'),
@@ -133,6 +145,14 @@ const app = buildApp({
     }),
   ],
 });
+
+if (config.LOG_PROMPTS && !logPrompts) {
+  app.log.warn(
+    { NODE_ENV: config.NODE_ENV },
+    'LOG_PROMPTS is set but ignored: prompt logging is only allowed when NODE_ENV=development',
+  );
+}
+if (!tracing) app.log.info('tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set');
 
 redis.on('error', (err) => app.log.warn({ err: err.message }, 'redis connection error'));
 subscriber.on('error', (err) => app.log.warn({ err: err.message }, 'redis subscriber error'));
@@ -192,6 +212,7 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(sweepTimer);
   clearInterval(reconcileTimer);
   await app.close();
+  await tracing?.shutdown();
   await usageRecorder.flush();
   await usageQueue.close();
   await Promise.allSettled([pool.end(), redis.quit(), subscriber.quit()]);

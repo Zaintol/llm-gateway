@@ -50,6 +50,8 @@ services:
       # local/* models are only offered when an endpoint is set. With the Ollama profile:
       #   LOCAL_MODELS_BASE_URL=http://ollama:11434/v1 docker compose --profile local-models up
       LOCAL_MODELS_BASE_URL: ${LOCAL_MODELS_BASE_URL:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1}
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     # Usage events spilled while Redis is unreachable survive container restarts.
     volumes: [usage-spill:/app/data]
@@ -80,6 +82,15 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports: ['127.0.0.1:${MOCK_PROVIDER_PORT:-4000}:4000']
 
+  # Tail-sampling collector in front of Grafana: keeps every error trace, samples the rest.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ['--config=/etc/otelcol/config.yaml']
+    environment:
+      TRACE_SAMPLE_PERCENT: ${TRACE_SAMPLE_PERCENT:-100}
+    volumes: ['./infra/otel-collector.yaml:/etc/otelcol/config.yaml:ro']
+    depends_on: [lgtm]
+
   # Grafana, Tempo, Prometheus, Loki and an OTel Collector in one container (OTLP on 4317/4318).
   lgtm:
     image: grafana/otel-lgtm:0.11.0
@@ -87,6 +98,8 @@ services:
       - '127.0.0.1:${GRAFANA_PORT:-3001}:3000'
       - '127.0.0.1:4317:4317'
       - '127.0.0.1:4318:4318'
+      # Tempo HTTP API (look up a trace by the id in a log line or the x-trace-id header).
+      - '127.0.0.1:3200:3200'
     volumes: [lgtm-data:/data]
 
   ollama:
