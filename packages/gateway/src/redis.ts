@@ -10,3 +10,11 @@ export function createRedis(url: string): Redis {
     lazyConnect: true,
   });
 }
+
+/**
+ * Connection for pub/sub. Unlike the command connection it queues while disconnected, so the
+ * subscription is established as soon as Redis is reachable and restored after reconnects.
+ */
+export function createSubscriber(url: string): Redis {
+  return new Redis(url, { lazyConnect: true });
+}

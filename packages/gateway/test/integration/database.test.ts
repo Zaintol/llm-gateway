@@ -2,7 +2,9 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { createDb, createPool, type Db } from '../../src/db/client.js';
-import { runMigrations } from '../../src/db/migrate.js';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { migrationsFolder, runMigrations } from '../../src/db/migrate.js';
 import { insertUsageEvent, type NewUsageEvent } from '../../src/db/usage-events.js';
 
 const expectedTables = [
@@ -18,6 +20,12 @@ const expectedTables = [
   'usage_events',
   'usage_rollups_hourly',
 ];
+
+const migrationFiles = (
+  JSON.parse(readFileSync(path.join(migrationsFolder, 'meta/_journal.json'), 'utf8')) as {
+    entries: unknown[];
+  }
+).entries.length;
 
 let container: StartedPostgreSqlContainer;
 let pool: pg.Pool;
@@ -67,7 +75,7 @@ describe('migrations', () => {
        order by 1`,
     );
     expect(rows.map((r) => r.table_name)).toEqual(expectedTables);
-    expect(await journalCount()).toBe(2);
+    expect(await journalCount()).toBe(migrationFiles);
   });
 
   it('apply no changes when run against an already migrated database', async () => {

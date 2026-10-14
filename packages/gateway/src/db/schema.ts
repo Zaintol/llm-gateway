@@ -62,6 +62,8 @@ export const apiKeys = pgTable(
     prefix: text('prefix').notNull().unique(),
     /** SHA-256 hex digest of the secret part; the secret itself is never stored. */
     secretHash: text('secret_hash').notNull(),
+    /** Actor id of whoever created the key (admin user, or `cli:<os user>`). */
+    createdBy: text('created_by').notNull(),
     createdAt: createdAt(),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
