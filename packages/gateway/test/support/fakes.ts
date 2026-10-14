@@ -41,6 +41,7 @@ export class InMemoryKeyStore implements KeyStore {
       revokedAt: null,
       tenantStatus: 'active',
       tenantSettings: {},
+      limits: { key: { rpm: null, tpm: null }, tenant: { rpm: null, tpm: null } },
       ...overrides,
     };
     this.records.set(record.prefix, record);

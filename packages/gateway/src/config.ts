@@ -73,6 +73,8 @@ const envSchema = z.object({
   USAGE_JOB_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** Exponential backoff base: 5s gives ~2.5 minutes of retries across 5 attempts. */
   USAGE_JOB_BACKOFF_MS: z.coerce.number().int().positive().default(5_000),
+  /** Bearer token for GET /metrics; unset leaves it open (fine on a private network). */
+  METRICS_TOKEN: z.string().min(16).optional(),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

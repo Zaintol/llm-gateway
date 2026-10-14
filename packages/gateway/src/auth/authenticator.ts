@@ -1,5 +1,5 @@
 import { GatewayError } from '../errors.js';
-import type { KeyRecord, KeyStore } from './key-store.js';
+import type { KeyRecord, KeyStore, RateLimits } from './key-store.js';
 import { parseApiKey, secretMatches } from './keys.js';
 import { TtlCache } from './ttl-cache.js';
 
@@ -8,6 +8,7 @@ export type AuthContext = {
   keyId: string;
   keyPrefix: string;
   tenantSettings: Record<string, unknown>;
+  limits: RateLimits;
 };
 
 export type AuthenticatorOptions = {
@@ -69,6 +70,7 @@ export class Authenticator {
       keyId: record.keyId,
       keyPrefix: record.prefix,
       tenantSettings: record.tenantSettings,
+      limits: record.limits,
     };
   }
 

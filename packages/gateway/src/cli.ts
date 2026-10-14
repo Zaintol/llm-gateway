@@ -8,6 +8,7 @@
  *   gw credential:set <tenant-slug|--platform> <provider> <label> [--base-url <url>]  (secret on stdin)
  *   gw credential:list <tenant-slug|--platform>
  *   gw credentials:reencrypt
+ *   gw limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
  */
 import { userInfo } from 'node:os';
 import { ConfigError, loadConfig } from './config.js';
@@ -25,6 +26,7 @@ import {
   findTenantBySlug,
   listApiKeys,
   revokeApiKey,
+  setRateLimits,
   type Actor,
 } from './tenancy/service.js';
 
@@ -35,7 +37,25 @@ const usage = `Usage:
   key:revoke <tenant-slug> <key-prefix>
   credential:set <tenant-slug|--platform> <provider> <label> [--base-url <url>]   (secret on stdin)
   credential:list <tenant-slug|--platform>
-  credentials:reencrypt`;
+  credentials:reencrypt
+  limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]`;
+
+/** Reads `--flag value` pairs into a map. */
+function flags(args: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (let i = 0; i < args.length; i++) {
+    if (args[i]!.startsWith('--')) out.set(args[i]!.slice(2), args[i + 1] ?? '');
+  }
+  return out;
+}
+
+function limitValue(raw: string | undefined, name: string): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === 'none') return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) fail(`--${name} must be a positive integer or "none"`);
+  return n;
+}
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -165,6 +185,30 @@ try {
       const count = await reencryptCredentials(db, keyProviderFromConfig(config));
       console.log(
         `Re-wrapped ${count} credential(s) under master key v${config.GATEWAY_MASTER_KEY_VERSION}`,
+      );
+      break;
+    }
+    case 'limits:set': {
+      const [slug, ...rest] = args;
+      const f = flags(rest);
+      const rpm = limitValue(f.get('rpm'), 'rpm');
+      const tpm = limitValue(f.get('tpm'), 'tpm');
+      if (rpm === undefined && tpm === undefined) fail(usage);
+      const redis = createRedis(config.REDIS_URL);
+      await redis.connect();
+      try {
+        await setRateLimits(
+          db,
+          redis,
+          { tenantId: await tenantId(slug), ...(f.get('key') ? { keyPrefix: f.get('key')! } : {}) },
+          { ...(rpm !== undefined ? { rpm } : {}), ...(tpm !== undefined ? { tpm } : {}) },
+          actor,
+        );
+      } finally {
+        redis.disconnect();
+      }
+      console.log(
+        `Rate limits updated for ${f.get('key') ? `key ${f.get('key')}` : `tenant ${slug}`}`,
       );
       break;
     }

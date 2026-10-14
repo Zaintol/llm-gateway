@@ -11,7 +11,12 @@ export type KeyRecord = {
   revokedAt: Date | null;
   tenantStatus: 'active' | 'suspended';
   tenantSettings: Record<string, unknown>;
+  limits: RateLimits;
 };
+
+export type Limit = { rpm: number | null; tpm: number | null };
+/** Per-key and tenant-wide rate limits; null means unlimited. */
+export type RateLimits = { key: Limit; tenant: Limit };
 
 export interface KeyStore {
   findByPrefix(prefix: string): Promise<KeyRecord | null>;
@@ -32,6 +37,10 @@ export class PgKeyStore implements KeyStore {
         revokedAt: apiKeys.revokedAt,
         tenantStatus: tenants.status,
         tenantSettings: tenantSettings.settings,
+        keyRpm: apiKeys.rpmLimit,
+        keyTpm: apiKeys.tpmLimit,
+        tenantRpm: tenants.rpmLimit,
+        tenantTpm: tenants.tpmLimit,
       })
       .from(apiKeys)
       .innerJoin(tenants, eq(tenants.id, apiKeys.tenantId))
@@ -39,7 +48,12 @@ export class PgKeyStore implements KeyStore {
       .where(eq(apiKeys.prefix, prefix))
       .limit(1);
     if (!row) return null;
-    return { ...row, tenantSettings: (row.tenantSettings as Record<string, unknown> | null) ?? {} };
+    const { keyRpm, keyTpm, tenantRpm, tenantTpm, ...rest } = row;
+    return {
+      ...rest,
+      tenantSettings: (row.tenantSettings as Record<string, unknown> | null) ?? {},
+      limits: { key: { rpm: keyRpm, tpm: keyTpm }, tenant: { rpm: tenantRpm, tpm: tenantTpm } },
+    };
   }
 
   async touchLastUsed(keyId: string, at: Date): Promise<void> {

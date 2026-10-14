@@ -36,6 +36,9 @@ export const tenants = pgTable(
     status: text('status', { enum: ['active', 'suspended'] })
       .notNull()
       .default('active'),
+    /** Tenant-wide requests and tokens per minute; null means unlimited. */
+    rpmLimit: integer('rpm_limit'),
+    tpmLimit: integer('tpm_limit'),
     createdAt: createdAt(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -64,6 +67,9 @@ export const apiKeys = pgTable(
     secretHash: text('secret_hash').notNull(),
     /** Actor id of whoever created the key (admin user, or `cli:<os user>`). */
     createdBy: text('created_by').notNull(),
+    /** Per-key requests and tokens per minute; null means unlimited. */
+    rpmLimit: integer('rpm_limit'),
+    tpmLimit: integer('tpm_limit'),
     createdAt: createdAt(),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
