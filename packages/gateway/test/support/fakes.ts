@@ -1,3 +1,4 @@
+import type { CatalogModel } from '../../src/catalog/catalog.js';
 import type { ChatCompletionRequest } from '@gw/schema';
 import type { CredentialSource } from '../../src/chat/route.js';
 import type { ResolvedCredential } from '../../src/credentials/service.js';
@@ -102,5 +103,27 @@ export function cannedResult(model: string, content = 'hello'): ProviderResult {
       usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
     },
     usage: { inputTokens: 3, outputTokens: 1, cachedInputTokens: 0, source: 'provider' },
+  };
+}
+
+export function catalogModel(overrides: Partial<CatalogModel> = {}): CatalogModel {
+  return {
+    id: 'mock/fast',
+    provider: 'mock',
+    upstreamModel: 'fast',
+    contextWindow: 32000,
+    maxOutputTokens: 4096,
+    capabilities: { tools: false, vision: false, jsonMode: true, streaming: true },
+    qualityTier: 1,
+    latencyTier: 'fast' as const,
+    enabled: true,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    price: {
+      id: 'price_1',
+      inputPerMtokMicros: 50_000n,
+      outputPerMtokMicros: 200_000n,
+      cachedInputPerMtokMicros: null,
+    },
+    ...overrides,
   };
 }

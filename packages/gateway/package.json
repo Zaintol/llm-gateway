@@ -5,7 +5,8 @@
   "type": "module",
   "files": [
     "dist",
-    "drizzle"
+    "drizzle",
+    "catalog"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -18,7 +19,9 @@
     "test:integration": "vitest run --project integration",
     "migrate:dev": "node --conditions=@gw/source --import tsx src/db/migrate.ts",
     "cli": "node dist/cli.js",
-    "cli:dev": "node --conditions=@gw/source --import tsx src/cli.ts"
+    "cli:dev": "node --conditions=@gw/source --import tsx src/cli.ts",
+    "seed:catalog": "node dist/catalog/seed.js",
+    "seed:catalog:dev": "node --conditions=@gw/source --import tsx src/catalog/seed.ts"
   },
   "devDependencies": {
     "@gw/mock-provider": "workspace:*",
@@ -36,6 +39,7 @@
     "fastify": "^5.12.7",
     "ioredis": "^6.0.0",
     "pg": "^8.23.1",
+    "yaml": "^2.9.1",
     "zod": "^4.6.7"
   }
 }

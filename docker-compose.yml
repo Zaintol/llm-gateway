@@ -24,11 +24,11 @@ services:
       timeout: 3s
       retries: 20
 
-  # One-off: applies migrations, then exits. The gateway never migrates on boot.
+  # One-off: applies migrations and seeds the model catalog, then exits. The gateway never migrates on boot.
   migrate:
     build: { context: ., target: gateway }
     image: llm-gateway/gateway:local
-    command: ['node', 'dist/db/migrate.js']
+    command: ['sh', '-c', 'node dist/db/migrate.js && node dist/catalog/seed.js']
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     depends_on:
