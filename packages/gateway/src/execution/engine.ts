@@ -1,5 +1,6 @@
 import type { ChatCompletionRequest } from '@gw/schema';
 import { ProviderError, type ProviderErrorKind } from '../providers/errors.js';
+import { context, markError, trace, tracer } from '../observability/tracing.js';
 import type { ProviderResult, StreamEvent } from '../providers/types.js';
 import type { Candidate } from '../routing/planner.js';
 
@@ -123,6 +124,10 @@ export class ExecutionEngine {
           ]),
           ...(candidate.model ? { maxOutputTokens: candidate.model.maxOutputTokens } : {}),
         });
+        trace.getActiveSpan()?.setAttributes({
+          'gen_ai.usage.input_tokens': result.usage.inputTokens,
+          'gen_ai.usage.output_tokens': result.usage.outputTokens,
+        });
         return { result };
       },
     ).then(({ value, served, attempts }) => ({ result: value.result, served, attempts }));
@@ -208,16 +213,39 @@ export class ExecutionEngine {
         if (remaining() <= 0 || callerSignal.aborted) break;
         const started = this.now();
         tries++;
+        // One span per attempt, following the OpenTelemetry GenAI conventions.
+        const span = tracer().startSpan('provider.attempt', {
+          attributes: {
+            'gen_ai.system': candidate.provider,
+            'gen_ai.request.model': candidate.upstreamModel,
+            'gateway.model': candidate.id,
+            'gateway.attempt': retry + 1,
+          },
+        });
         try {
-          const value = await attempt(candidate, remaining(), callerSignal);
+          const value = await context.with(trace.setSpan(context.active(), span), () =>
+            attempt(candidate, remaining(), callerSignal),
+          );
           attempts.push(record(candidate, retry, 'success', this.now() - started));
+          span.setAttribute('gateway.outcome', 'success');
+          span.end();
           return { value, served: candidate, attempts };
         } catch (err) {
-          if (!(err instanceof ProviderError)) throw err;
+          if (!(err instanceof ProviderError)) {
+            markError(span, err);
+            span.end();
+            throw err;
+          }
           lastError = err;
           attempts.push(
             record(candidate, retry, err.kind, this.now() - started, err.upstreamStatus),
           );
+          span.setAttributes({
+            'gateway.outcome': err.kind,
+            ...(err.upstreamStatus ? { 'http.response.status_code': err.upstreamStatus } : {}),
+          });
+          markError(span, err);
+          span.end();
 
           if (!err.fallbackEligible) {
             throw new ExecutionFailure(

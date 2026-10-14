@@ -32,6 +32,8 @@ export async function sendStream(input: {
   promptEstimate: number;
   clientSignal: AbortSignal;
   options: StreamOptions;
+  /** Called with the outcome just before the response ends. */
+  beforeEnd?: (outcome: StreamOutcome) => void;
 }): Promise<StreamOutcome> {
   const { reply, stream, includeUsage, clientSignal, options } = input;
   const raw = reply.raw;
@@ -152,6 +154,8 @@ export async function sendStream(input: {
       },
     });
   }
+  const outcome = { status, chunks, usage: finalUsage };
+  input.beforeEnd?.(outcome);
   if (open()) raw.end('data: [DONE]\n\n');
-  return { status, chunks, usage: finalUsage };
+  return outcome;
 }

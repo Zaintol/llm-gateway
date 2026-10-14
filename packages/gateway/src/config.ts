@@ -88,6 +88,15 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('true')
     .transform((v) => v === 'true'),
+  /** OTLP/HTTP collector base URL; tracing is off when unset. */
+  OTEL_EXPORTER_OTLP_ENDPOINT: optionalUrl,
+  /** Head sampling of new traces. Keep 1 and let the collector tail-sample (it keeps all errors). */
+  OTEL_TRACES_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(1),
+  /** Debug aid: log prompts at debug level. Ignored unless NODE_ENV=development. */
+  LOG_PROMPTS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

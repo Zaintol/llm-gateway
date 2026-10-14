@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { GatewayError } from '../errors.js';
 import type { AuthContext, Authenticator } from './authenticator.js';
 import type { FailureLimiter } from './failure-limiter.js';
+import { inSpan } from '../observability/tracing.js';
 import { looksLikeDataPlaneKey } from './keys.js';
 
 declare module 'fastify' {
@@ -29,7 +30,13 @@ export function requireApiKey(
       );
     }
     try {
-      request.auth = await authenticator.authenticate(request.headers.authorization);
+      request.auth = await inSpan('auth', {}, () =>
+        authenticator.authenticate(request.headers.authorization),
+      );
+      request.telemetry?.span?.setAttributes({
+        'tenant.id': request.auth.tenantId,
+        'key.prefix': request.auth.keyPrefix,
+      });
     } catch (err) {
       if (err instanceof GatewayError && err.type === 'authentication') {
         await failureLimiter.recordFailure(request.ip);

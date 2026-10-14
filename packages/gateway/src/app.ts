@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyPluginAsync } from 'fastify';
+import Fastify, {
+  LogController,
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyPluginAsync,
+} from 'fastify';
 import { errorEnvelope } from '@gw/schema';
+import type { DestinationStream } from 'pino';
 import { guardAdminPlane, requireApiKey, type DataPlaneAuth } from './auth/plugin.js';
 import { GatewayError } from './errors.js';
+import { loggerOptions } from './observability/logging.js';
 import { registry } from './observability/metrics.js';
+import { SpanStatusCode, context, startRequestSpan, type Span } from './observability/tracing.js';
 import { checkReadiness, type DependencyCheck } from './readiness.js';
 
 /** Fastify's own client errors, renamed into the gateway's vocabulary. */
@@ -14,8 +22,28 @@ const fastifyErrorCodes: Record<string, string> = {
   FST_ERR_CTP_INVALID_JSON_BODY: 'invalid_json',
 };
 
+/** Per-request facts gathered along the pipeline for the access log line and the root span. */
+export type RequestTelemetry = {
+  span: Span | null;
+  traceId: string | undefined;
+  servedModel?: string;
+  attempts?: number;
+  costMicros?: bigint;
+};
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    telemetry: RequestTelemetry;
+  }
+}
+
+/** Probes and scrapes run every few seconds; tracing and logging them would drown real traffic. */
+const QUIET_ROUTES = new Set(['/healthz', '/readyz', '/metrics']);
+
 export type AppOptions = {
   logLevel?: string;
+  /** Log destination; stdout when unset (tests capture lines here). */
+  logStream?: DestinationStream;
   /** Trust X-Forwarded-For from the platform proxy (needed for per-IP limits behind Fly). */
   trustProxy?: boolean;
   bodyLimitBytes?: number;
@@ -30,15 +58,74 @@ export type AppOptions = {
 
 export function buildApp(options: AppOptions): FastifyInstance {
   const app = Fastify({
-    logger: { level: options.logLevel ?? 'info' },
+    logger: {
+      ...loggerOptions(options.logLevel ?? 'info'),
+      ...(options.logStream ? { stream: options.logStream } : {}),
+    },
+    // One access line per request is written in onResponse instead of Fastify's two.
+    logController: new LogController({ disableRequestLogging: true }),
     trustProxy: options.trustProxy ?? false,
     bodyLimit: options.bodyLimitBytes ?? 1_048_576,
     requestIdHeader: 'x-request-id',
     genReqId: () => `req_${randomUUID()}`,
   });
 
+  app.decorateRequest('telemetry', null as unknown as RequestTelemetry);
+
+  // Root span per request, continuing any incoming W3C traceparent. Calling `done` inside
+  // context.with() runs the rest of the request lifecycle within the span's async context.
+  app.addHook('onRequest', (request, _reply, done) => {
+    const route = request.routeOptions.url ?? request.url;
+    if (QUIET_ROUTES.has(route)) {
+      request.telemetry = { span: null, traceId: undefined };
+      return done();
+    }
+    const { span, ctx } = startRequestSpan(`${request.method} ${route}`, request.headers, {
+      'http.request.method': request.method,
+      'http.route': route,
+      'url.path': request.url.split('?')[0],
+      'gateway.request_id': request.id,
+    });
+    const traceId = span.spanContext().traceId;
+    request.telemetry = { span, traceId };
+    context.with(ctx, done);
+  });
+
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id);
+    if (request.telemetry?.traceId) reply.header('x-trace-id', request.telemetry.traceId);
+  });
+
+  app.addHook('onResponse', async (request, reply) => {
+    const t = request.telemetry;
+    if (!t?.span) return;
+    const status = reply.statusCode;
+    t.span.setAttributes({
+      'http.response.status_code': status,
+      ...(t.servedModel ? { 'gateway.served_model': t.servedModel } : {}),
+      ...(t.attempts !== undefined ? { 'gateway.attempts': t.attempts } : {}),
+      ...(t.costMicros !== undefined
+        ? { 'gateway.cost_usd': Number(t.costMicros) / 1_000_000 }
+        : {}),
+    });
+    if (status >= 500) t.span.setStatus({ code: SpanStatusCode.ERROR });
+    t.span.end();
+    request.log.info(
+      {
+        request_id: request.id,
+        trace_id: t.traceId,
+        tenant_id: request.auth?.tenantId,
+        key_prefix: request.auth?.keyPrefix,
+        method: request.method,
+        route: request.routeOptions.url ?? request.url,
+        status,
+        served_model: t.servedModel,
+        attempts: t.attempts,
+        latency_ms: Math.round(reply.elapsedTime),
+        cost_usd: t.costMicros === undefined ? undefined : Number(t.costMicros) / 1_000_000,
+      },
+      'request completed',
+    );
   });
 
   // Liveness: the process is up and the event loop is serving requests.
