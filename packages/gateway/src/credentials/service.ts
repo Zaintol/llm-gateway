@@ -3,7 +3,7 @@ import type { Config } from '../config.js';
 import { TtlCache } from '../auth/ttl-cache.js';
 import type { Db } from '../db/client.js';
 import { auditLog, providerCredentials } from '../db/schema.js';
-import type { Actor } from '../tenancy/service.js';
+import { auditContext, type Actor } from '../tenancy/service.js';
 import { open, rewrap, seal } from './envelope.js';
 import { LocalKeyProvider, type KeyProvider } from './key-provider.js';
 
@@ -66,7 +66,12 @@ export async function setCredential(
       action: 'provider_credential.set',
       targetType: 'provider_credential',
       targetId: row!.id,
-      metadata: { provider: input.provider, label: input.label, last4: values.last4 },
+      metadata: {
+        ...auditContext(actor),
+        provider: input.provider,
+        label: input.label,
+        last4: values.last4,
+      },
     });
     return { id: row!.id, last4: values.last4 };
   });
@@ -146,6 +151,11 @@ export class CredentialResolver {
 
   invalidate(tenantId: string, provider: string): void {
     this.cache.delete(`${tenantId}:${provider}`);
+  }
+
+  /** Platform-default credentials back every tenant, so a change to one clears everything. */
+  invalidateAll(): void {
+    this.cache.clear();
   }
 }
 

@@ -39,6 +39,10 @@ export class PgBudgetSource implements BudgetSource {
     this.cache.set(tenantId, result);
     return result;
   }
+
+  invalidate(tenantId: string): void {
+    this.cache.delete(tenantId);
+  }
 }
 
 const ceilDiv = (n: bigint, d: bigint) => (n + d - 1n) / d;

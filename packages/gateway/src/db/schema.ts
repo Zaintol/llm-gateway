@@ -78,6 +78,35 @@ export const apiKeys = pgTable(
   (t) => [index('api_keys_tenant_idx').on(t.tenantId)],
 );
 
+/**
+ * Long-lived admin service tokens for automation (`gw_admin_<prefix>_<secret>`), stored like API
+ * keys: prefix for lookup, SHA-256 of the secret. A null tenant means platform scope.
+ */
+export const adminTokens = pgTable(
+  'admin_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    prefix: text('prefix').notNull().unique(),
+    secretHash: text('secret_hash').notNull(),
+    role: text('role', { enum: ['platform_admin', 'tenant_admin', 'finance_viewer'] }).notNull(),
+    tenantId: uuid('tenant_id').references(() => tenants.id, { onDelete: 'cascade' }),
+    createdBy: text('created_by').notNull(),
+    createdAt: createdAt(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => [
+    check(
+      'admin_tokens_role_check',
+      sql`${t.role} in ('platform_admin', 'tenant_admin', 'finance_viewer')`,
+    ),
+    check(
+      'admin_tokens_scope_check',
+      sql`(${t.role} = 'platform_admin') = (${t.tenantId} is null)`,
+    ),
+  ],
+);
+
 /** Envelope-encrypted (AES-256-GCM) upstream credentials. A null tenant means a global credential. */
 export const providerCredentials = pgTable(
   'provider_credentials',

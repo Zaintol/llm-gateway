@@ -8,6 +8,7 @@ import { migrationsFolder, runMigrations } from '../../src/db/migrate.js';
 import { insertUsageEvent, type NewUsageEvent } from '../../src/db/usage-events.js';
 
 const expectedTables = [
+  'admin_tokens',
   'api_keys',
   'audit_log',
   'budgets',

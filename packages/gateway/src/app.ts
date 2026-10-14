@@ -7,6 +7,8 @@ import Fastify, {
 } from 'fastify';
 import { errorEnvelope } from '@gw/schema';
 import type { DestinationStream } from 'pino';
+import { adminOpenApi } from './admin/openapi.js';
+import { registerAdminRoutes, type AdminDeps, type AdminRoute } from './admin/routes.js';
 import { guardAdminPlane, requireApiKey, type DataPlaneAuth } from './auth/plugin.js';
 import { GatewayError } from './errors.js';
 import { loggerOptions } from './observability/logging.js';
@@ -52,6 +54,8 @@ export type AppOptions = {
   auth: DataPlaneAuth;
   /** When set, GET /metrics requires `Authorization: Bearer <metricsToken>`. */
   metricsToken?: string;
+  /** The admin control plane (/admin/v1). Without it every admin route answers 401. */
+  admin?: { deps: AdminDeps; routes: AdminRoute[]; version: string };
   /** Routes mounted under /v1, behind API key authentication. */
   dataPlaneRoutes?: FastifyPluginAsync[];
 };
@@ -171,6 +175,13 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   app.register(
     async (adminPlane) => {
+      if (options.admin) {
+        const { deps, routes, version } = options.admin;
+        const document = adminOpenApi(routes, version);
+        adminPlane.get('/openapi.json', async () => document);
+        registerAdminRoutes(adminPlane, deps, routes);
+        return;
+      }
       guardAdminPlane(adminPlane);
       // Admin routes arrive with GW-9.1. Unknown admin paths still pass through the guard.
       adminPlane.all('/*', async () => {

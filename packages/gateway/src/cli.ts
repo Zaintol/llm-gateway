@@ -10,6 +10,8 @@
  *   gw credentials:reencrypt
  *   gw limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
  *   gw budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]
+ *   gw admin-token:create <name> --role <role> [--tenant <slug>]
+ *   gw admin-jwt:mint --role <role> [--tenant <slug>] [--subject <email>] [--ttl <seconds>]
  */
 import { userInfo } from 'node:os';
 import { ConfigError, loadConfig } from './config.js';
@@ -20,6 +22,7 @@ import {
   reencryptCredentials,
   setCredential,
 } from './credentials/service.js';
+import { createAdminToken, mintAdminJwt } from './admin/auth.js';
 import { createRedis } from './redis.js';
 import {
   createApiKey,
@@ -30,6 +33,7 @@ import {
   setBudget,
   setRateLimits,
   type Actor,
+  type AdminRole,
 } from './tenancy/service.js';
 
 const usage = `Usage:
@@ -41,7 +45,14 @@ const usage = `Usage:
   credential:list <tenant-slug|--platform>
   credentials:reencrypt
   limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
-  budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]`;
+  budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]
+  admin-token:create <name> --role <platform_admin|tenant_admin|finance_viewer> [--tenant <slug>]
+  admin-jwt:mint --role <role> [--tenant <slug>] [--subject <email>] [--ttl <seconds>]`;
+
+function adminRole(raw: string | undefined): AdminRole {
+  if (raw === 'platform_admin' || raw === 'tenant_admin' || raw === 'finance_viewer') return raw;
+  return fail('--role must be platform_admin, tenant_admin or finance_viewer');
+}
 
 function usdValue(raw: string | undefined, name: string): bigint | null | undefined {
   if (raw === undefined) return undefined;
@@ -242,6 +253,35 @@ try {
         actor,
       );
       console.log(`${period} budget updated for ${slug}`);
+      break;
+    }
+    case 'admin-token:create': {
+      const [name, ...rest] = args;
+      if (!name) fail(usage);
+      const f = flags(rest);
+      const role = adminRole(f.get('role'));
+      const scope = role === 'platform_admin' ? null : await tenantId(f.get('tenant'));
+      const { token, prefix } = await createAdminToken(db, { name, role, tenantId: scope }, actor);
+      console.log(
+        `Created ${role} service token "${name}" (prefix ${prefix}). Copy it now; it cannot be shown again:\n`,
+      );
+      console.log(token);
+      break;
+    }
+    case 'admin-jwt:mint': {
+      // Development convenience: production dashboards mint these server-side after sign-in.
+      if (!config.ADMIN_JWT_SECRET) fail('ADMIN_JWT_SECRET is not set');
+      const f = flags(args);
+      const role = adminRole(f.get('role'));
+      const scope = role === 'platform_admin' ? null : await tenantId(f.get('tenant'));
+      const ttl = f.get('ttl') ? Number(f.get('ttl')) : 15 * 60;
+      console.log(
+        await mintAdminJwt(
+          config.ADMIN_JWT_SECRET,
+          { subject: f.get('subject') ?? `cli:${userInfo().username}`, role, tenantId: scope },
+          ttl,
+        ),
+      );
       break;
     }
     default:

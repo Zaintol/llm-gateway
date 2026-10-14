@@ -97,6 +97,8 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  /** HS256 secret shared with the dashboard for 15-minute admin JWTs; unset disables JWT login. */
+  ADMIN_JWT_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(32).optional()),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')
