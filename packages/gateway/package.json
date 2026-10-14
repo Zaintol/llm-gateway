@@ -23,7 +23,9 @@
     "seed:catalog": "node dist/catalog/seed.js",
     "seed:catalog:dev": "node --conditions=@gw/source --import tsx src/catalog/seed.ts",
     "worker": "node dist/worker.js",
-    "worker:dev": "node --conditions=@gw/source --import tsx --watch src/worker.ts"
+    "worker:dev": "node --conditions=@gw/source --import tsx --watch src/worker.ts",
+    "test:coverage": "vitest run --coverage --project unit --project integration",
+    "test:live": "vitest run --project live"
   },
   "devDependencies": {
     "@gw/mock-provider": "workspace:*",

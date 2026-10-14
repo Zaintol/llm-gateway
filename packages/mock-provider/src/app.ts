@@ -1,30 +1,25 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 
 /**
- * Fake OpenAI-compatible upstream for tests, load tests and the public demo.
+ * Fake upstream for tests, load tests and the public demo. It speaks the OpenAI chat completions
+ * API (POST /v1/chat/completions) and the Anthropic Messages API (POST /v1/messages), streaming
+ * included, and never calls anything external.
  *
- * Behaviour is chosen by the requested model name, so a gateway route can target a failure mode
- * without special headers:
- *   *rate-limit*    429 with an OpenAI error body
- *   *server-error*  500
- *   *bad-request*   400
- *   *unauthorized*  401
- *   *no-usage*      200 without a usage block
- *   *slow-<ms>*     delays the response by <ms> milliseconds
- * Anything else answers 200 with a deterministic reply.
+ * Behaviour comes from two sources, merged per request:
  *
- * POST /v1/messages speaks the Anthropic Messages API with the same failure modes, plus:
- *   *tool*          answers with a tool_use block for the first tool in the request
+ * 1. Modifiers in the requested model name, so a gateway route can target a failure mode:
+ *      rate-limit · server-error · bad-request · unauthorized · forbidden · not-found · status-<code>
+ *      slow-<ms> (delay before responding) · no-usage · tool (call the first tool)
+ *      chunks-<n> · chunk-delay-<ms> · fail-after-<n> · stall-after-<n>   (streaming)
  *
+ * 2. Fault rules set at runtime, for load tests and failover drills:
+ *      POST /mock/faults   {"match":"gpt","status":503,"errorRate":1,"latencyMs":0,
+ *                           "ttftMs":0,"failAfterChunks":5,"noUsage":false}
+ *      GET /mock/faults · DELETE /mock/faults
+ *    `match` is a substring of the model ("*" matches all); the first matching rule applies.
  *
- * With `stream: true` both endpoints answer with server-sent events. Streaming modifiers:
- *   *chunks-<n>*        emit n content chunks ("tok0 tok1 ...") instead of the echo reply
- *   *chunk-delay-<ms>*  wait between chunks (default 2 ms)
- *   *fail-after-<n>*    drop the connection after n chunks (mid-stream failure)
- *   *stall-after-<n>*   stop sending after n chunks but keep the connection open (idle)
- * Requests the client abandons mid-stream are recorded with `aborted: true` in /mock/requests.
- *
- * GW-10.1 extends this with Gemini shapes and runtime fault injection.
+ * GET /mock/requests lists recent requests (newest first, `aborted: true` if the client left
+ * mid-stream); DELETE /mock/requests clears it.
  */
 
 type RecordedRequest = {
@@ -35,41 +30,109 @@ type RecordedRequest = {
   abortedAt?: number;
 };
 
+export type FaultRule = {
+  match: string;
+  status?: number;
+  /** Probability (0-1) that `status` is returned; default 1. */
+  errorRate?: number;
+  latencyMs?: number;
+  ttftMs?: number;
+  failAfterChunks?: number;
+  noUsage?: boolean;
+};
+
+type Behaviour = {
+  errorStatus?: number;
+  delayMs: number;
+  chunks?: number;
+  chunkDelayMs: number;
+  failAfter?: number;
+  stallAfter?: number;
+  noUsage: boolean;
+  tool: boolean;
+};
+
+type ChatMessage = { role: string; content?: unknown };
+type ToolDef = { name?: string; function?: { name?: string } };
+
+const NAMED_STATUS: Record<string, number> = {
+  'rate-limit': 429,
+  'server-error': 500,
+  'bad-request': 400,
+  unauthorized: 401,
+  forbidden: 403,
+  'not-found': 404,
+};
+
 const numberAfter = (model: string, label: string) => {
   const match = new RegExp(`${label}-(\\d+)`).exec(model);
   return match ? Number(match[1]) : undefined;
 };
 
+const estimateTokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-type StreamPlan = { pieces: string[]; delayMs: number; failAfter?: number; stallAfter?: number };
+function lastUserText(messages: unknown): string {
+  if (!Array.isArray(messages)) return '';
+  const last = [...(messages as ChatMessage[])].reverse().find((m) => m?.role === 'user');
+  if (!last) return '';
+  if (typeof last.content === 'string') return last.content;
+  if (Array.isArray(last.content)) {
+    return (last.content as Array<{ type?: string; text?: string }>)
+      .filter((p) => p?.type === 'text')
+      .map((p) => p.text ?? '')
+      .join(' ');
+  }
+  return '';
+}
 
-function streamPlan(model: string, replyText: string): StreamPlan {
-  const count = numberAfter(model, 'chunks');
-  const pieces = count
-    ? Array.from({ length: count }, (_, i) => `tok${i} `)
-    : replyText.split(/(?<= )/);
-  return {
-    pieces,
-    delayMs: numberAfter(model, 'chunk-delay') ?? 2,
+function behaviourFor(model: string, faults: FaultRule[], random: () => number): Behaviour {
+  const named = Object.entries(NAMED_STATUS).find(([name]) => model.includes(name))?.[1];
+  const behaviour: Behaviour = {
+    ...((named ?? numberAfter(model, 'status'))
+      ? { errorStatus: named ?? numberAfter(model, 'status')! }
+      : {}),
+    delayMs: numberAfter(model, 'slow') ?? 0,
+    ...(numberAfter(model, 'chunks') !== undefined
+      ? { chunks: numberAfter(model, 'chunks')! }
+      : {}),
+    chunkDelayMs: numberAfter(model, 'chunk-delay') ?? 2,
     ...(numberAfter(model, 'fail-after') !== undefined
       ? { failAfter: numberAfter(model, 'fail-after')! }
       : {}),
     ...(numberAfter(model, 'stall-after') !== undefined
       ? { stallAfter: numberAfter(model, 'stall-after')! }
       : {}),
+    noUsage: model.includes('no-usage'),
+    tool: model.includes('tool'),
   };
+  const rule = faults.find((f) => f.match === '*' || model.includes(f.match));
+  if (rule) {
+    if (rule.status !== undefined && random() < (rule.errorRate ?? 1))
+      behaviour.errorStatus = rule.status;
+    if (rule.latencyMs !== undefined) behaviour.delayMs = rule.latencyMs;
+    if (rule.ttftMs !== undefined) behaviour.delayMs = rule.ttftMs;
+    if (rule.failAfterChunks !== undefined) behaviour.failAfter = rule.failAfterChunks;
+    if (rule.noUsage) behaviour.noUsage = true;
+  }
+  return behaviour;
 }
 
+/** Text to stream: numbered tokens for `chunks-<n>`, else the echo reply split into words. */
+const pieces = (b: Behaviour, reply: string) =>
+  b.chunks !== undefined
+    ? Array.from({ length: b.chunks }, (_, i) => `tok${i} `)
+    : reply.split(/(?<= )/);
+
 /**
- * Writes SSE frames produced by `frames(i)` for each piece, honouring the failure modifiers.
- * Returns once the stream ends, fails, stalls, or the client goes away.
+ * Writes SSE frames, honouring the streaming failure modes. Returns once the stream ends, fails,
+ * stalls, or the client goes away.
  */
 async function writeStream(
   reply: FastifyReply,
   entry: RecordedRequest,
-  plan: StreamPlan,
-  frames: { start: string[]; piece: (text: string, i: number) => string; end: string[] },
+  b: Behaviour,
+  frames: { start: string[]; body: string[]; end: string[] },
 ) {
   reply.hijack();
   const res = reply.raw;
@@ -83,121 +146,140 @@ async function writeStream(
   });
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   for (const frame of frames.start) res.write(frame);
-  for (const [i, piece] of plan.pieces.entries()) {
+  for (const [i, frame] of frames.body.entries()) {
     if (closed) return;
-    if (plan.failAfter !== undefined && i >= plan.failAfter) {
+    if (b.failAfter !== undefined && i >= b.failAfter) {
       res.destroy();
       return;
     }
-    if (plan.stallAfter !== undefined && i >= plan.stallAfter) return; // idle until the client leaves
-    res.write(frames.piece(piece, i));
-    await sleep(plan.delayMs);
+    if (b.stallAfter !== undefined && i >= b.stallAfter) return; // idle until the client leaves
+    res.write(frame);
+    await sleep(b.chunkDelayMs);
   }
   if (closed) return;
   for (const frame of frames.end) res.write(frame);
   res.end();
 }
 
-const estimateTokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
-
-function lastUserText(messages: unknown): string {
-  if (!Array.isArray(messages)) return '';
-  const last = [...messages].reverse().find((m) => m?.role === 'user');
-  if (!last) return '';
-  if (typeof last.content === 'string') return last.content;
-  if (Array.isArray(last.content)) {
-    return last.content
-      .filter((p: { type?: string }) => p?.type === 'text')
-      .map((p: { text?: string }) => p.text ?? '')
-      .join(' ');
-  }
-  return '';
-}
-
-const openAiError = (type: string, code: string, message: string) => ({
-  error: { message, type, code, param: null },
-});
-
 export function buildApp(
-  options: { logLevel?: string; historySize?: number } = {},
+  options: { logLevel?: string; historySize?: number; random?: () => number } = {},
 ): FastifyInstance {
   const app = Fastify({ logger: { level: options.logLevel ?? 'info' } });
   const history: RecordedRequest[] = [];
+  let faults: FaultRule[] = [];
   let counter = 0;
+  const random = options.random ?? Math.random;
+
+  const record = (path: string, headers: Record<string, unknown>, body: unknown) => {
+    const entry: RecordedRequest = { path, headers, body };
+    history.unshift(entry);
+    history.length = Math.min(history.length, options.historySize ?? 50);
+    return entry;
+  };
 
   app.get('/healthz', async () => ({ status: 'ok' }));
 
-  /** Most recent requests first; lets tests assert exactly what the gateway sent upstream. */
   app.get('/mock/requests', async () => history);
   app.delete('/mock/requests', async (_req, reply) => {
     history.length = 0;
     return reply.code(204).send();
   });
 
+  app.get('/mock/faults', async () => faults);
+  app.post('/mock/faults', async (request, reply) => {
+    const rule = request.body as FaultRule;
+    if (!rule || typeof rule.match !== 'string') {
+      return reply.code(400).send({ error: 'a fault rule needs a "match" string' });
+    }
+    faults.push(rule);
+    return reply.code(201).send(faults);
+  });
+  app.delete('/mock/faults', async (_req, reply) => {
+    faults = [];
+    return reply.code(204).send();
+  });
+
+  // ---------------------------------------------------------------- OpenAI chat completions
   app.post('/v1/chat/completions', async (request, reply) => {
     const body = (request.body ?? {}) as {
       model?: string;
       messages?: unknown;
-      max_tokens?: number;
+      tools?: ToolDef[];
+      stream?: boolean;
+      stream_options?: { include_usage?: boolean };
     };
-    history.unshift({ path: request.url, headers: request.headers, body });
-    history.length = Math.min(history.length, options.historySize ?? 50);
-
+    const entry = record(request.url, request.headers, body);
     const model = body.model ?? 'mock';
-    const delay = /slow-(\d+)/.exec(model);
-    if (delay) await new Promise((r) => setTimeout(r, Number(delay[1])));
+    const b = behaviourFor(model, faults, random);
+    if (b.delayMs) await sleep(b.delayMs);
 
-    if (model.includes('rate-limit')) {
-      return reply
-        .code(429)
-        .header('retry-after', '1')
-        .send(openAiError('rate_limit_error', 'rate_limit_exceeded', 'Rate limit reached (mock)'));
-    }
-    if (model.includes('server-error')) {
-      return reply
-        .code(500)
-        .send(openAiError('server_error', 'server_error', 'Upstream exploded (mock)'));
-    }
-    if (model.includes('bad-request')) {
-      return reply
-        .code(400)
-        .send(
-          openAiError(
-            'invalid_request_error',
-            'invalid_value',
-            "Invalid value for 'temperature' (mock)",
-          ),
-        );
-    }
-    if (model.includes('unauthorized')) {
-      return reply
-        .code(401)
-        .send(openAiError('invalid_request_error', 'invalid_api_key', 'Incorrect API key (mock)'));
+    if (b.errorStatus) {
+      const messages: Record<number, [string, string, string]> = {
+        429: ['rate_limit_error', 'rate_limit_exceeded', 'Rate limit reached (mock)'],
+        500: ['server_error', 'server_error', 'Upstream exploded (mock)'],
+        400: ['invalid_request_error', 'invalid_value', "Invalid value for 'temperature' (mock)"],
+        401: ['invalid_request_error', 'invalid_api_key', 'Incorrect API key (mock)'],
+        403: ['invalid_request_error', 'forbidden', 'Not allowed (mock)'],
+        404: ['invalid_request_error', 'model_not_found', 'The model does not exist (mock)'],
+      };
+      const [type, code, message] = messages[b.errorStatus] ?? [
+        'server_error',
+        'error',
+        `HTTP ${b.errorStatus} (mock)`,
+      ];
+      if (b.errorStatus === 429) reply.header('retry-after', '1');
+      return reply.code(b.errorStatus).send({ error: { message, type, code, param: null } });
     }
 
-    const prompt = JSON.stringify(body.messages ?? []);
-    const content = `Mock reply to: ${lastUserText(body.messages)}`.trim();
-    const promptTokens = estimateTokens(prompt);
-    const completionTokens = estimateTokens(content);
     counter += 1;
+    const id = `chatcmpl-mock-${counter}`;
+    const promptTokens = estimateTokens(JSON.stringify(body.messages ?? []));
+    const toolName = b.tool
+      ? (body.tools?.[0]?.function?.name ?? body.tools?.[0]?.name)
+      : undefined;
+    const content = `Mock reply to: ${lastUserText(body.messages)}`.trim();
+    const toolArgs = JSON.stringify({ query: lastUserText(body.messages) });
+    const usage = (completion: string) => ({
+      prompt_tokens: promptTokens,
+      completion_tokens: estimateTokens(completion),
+      total_tokens: promptTokens + estimateTokens(completion),
+    });
 
-    if ((body as { stream?: boolean }).stream) {
-      const id = `chatcmpl-mock-${counter}`;
-      const plan = streamPlan(model, content);
-      const includeUsage =
-        (body as { stream_options?: { include_usage?: boolean } }).stream_options?.include_usage ===
-        true;
-      const chunk = (delta: object, finish: string | null, extra: object = {}) =>
-        `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
-      const streamed = plan.pieces.join('');
-      await writeStream(reply, history[0]!, plan, {
-        start: [chunk({ role: 'assistant', content: '' }, null)],
-        piece: (text) => chunk({ content: text }, null),
+    if (body.stream) {
+      const chunk = (delta: object, finish: string | null) =>
+        `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      const parts = toolName ? [toolArgs.slice(0, 8), toolArgs.slice(8)] : pieces(b, content);
+      const emitted = parts.join('');
+      await writeStream(reply, entry, b, {
+        start: [
+          chunk(
+            toolName
+              ? {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_mock_${counter}`,
+                      type: 'function',
+                      function: { name: toolName, arguments: '' },
+                    },
+                  ],
+                }
+              : { role: 'assistant', content: '' },
+            null,
+          ),
+        ],
+        body: parts.map((p) =>
+          toolName
+            ? chunk({ tool_calls: [{ index: 0, function: { arguments: p } }] }, null)
+            : chunk({ content: p }, null),
+        ),
         end: [
-          chunk({}, 'stop'),
-          ...(includeUsage && !model.includes('no-usage')
+          chunk({}, toolName ? 'tool_calls' : 'stop'),
+          ...(body.stream_options?.include_usage && !b.noUsage
             ? [
-                `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: estimateTokens(streamed), total_tokens: promptTokens + estimateTokens(streamed) } })}\n\n`,
+                `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [], usage: usage(emitted) })}\n\n`,
               ]
             : []),
           'data: [DONE]\n\n',
@@ -205,67 +287,86 @@ export function buildApp(
       });
       return reply;
     }
+
+    const message = toolName
+      ? {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: `call_mock_${counter}`,
+              type: 'function',
+              function: { name: toolName, arguments: toolArgs },
+            },
+          ],
+        }
+      : { role: 'assistant', content };
     return {
-      id: `chatcmpl-mock-${counter}`,
+      id,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model,
       choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content },
-          finish_reason: 'stop',
-          logprobs: null,
-        },
+        { index: 0, message, finish_reason: toolName ? 'tool_calls' : 'stop', logprobs: null },
       ],
-      ...(model.includes('no-usage')
-        ? {}
-        : {
-            usage: {
-              prompt_tokens: promptTokens,
-              completion_tokens: completionTokens,
-              total_tokens: promptTokens + completionTokens,
-            },
-          }),
+      ...(b.noUsage ? {} : { usage: usage(toolName ? toolArgs : content) }),
     };
   });
 
+  // ---------------------------------------------------------------- Anthropic messages
   app.post('/v1/messages', async (request, reply) => {
     const body = (request.body ?? {}) as {
       model?: string;
       messages?: Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
-      tools?: Array<{ name: string }>;
+      tools?: ToolDef[];
       max_tokens?: number;
+      stream?: boolean;
     };
-    history.unshift({ path: request.url, headers: request.headers, body });
-    history.length = Math.min(history.length, options.historySize ?? 50);
-
+    const entry = record(request.url, request.headers, body);
     const model = body.model ?? 'mock';
+    const b = behaviourFor(model, faults, random);
+    if (b.delayMs) await sleep(b.delayMs);
+
     const anthropicError = (status: number, type: string, message: string) =>
       reply.code(status).send({ type: 'error', error: { type, message } });
-    if (model.includes('rate-limit'))
-      return anthropicError(429, 'rate_limit_error', 'Rate limited (mock)');
-    if (model.includes('server-error'))
-      return anthropicError(529, 'overloaded_error', 'Overloaded (mock)');
-    if (model.includes('bad-request'))
-      return anthropicError(400, 'invalid_request_error', 'Bad request (mock)');
-    if (model.includes('unauthorized'))
-      return anthropicError(401, 'authentication_error', 'invalid x-api-key (mock)');
+    if (b.errorStatus) {
+      const errors: Record<number, [number, string, string]> = {
+        429: [429, 'rate_limit_error', 'Rate limited (mock)'],
+        500: [529, 'overloaded_error', 'Overloaded (mock)'],
+        400: [400, 'invalid_request_error', 'Bad request (mock)'],
+        401: [401, 'authentication_error', 'invalid x-api-key (mock)'],
+        403: [403, 'permission_error', 'Not allowed (mock)'],
+        404: [404, 'not_found_error', 'model not found (mock)'],
+      };
+      const [status, type, message] = errors[b.errorStatus] ?? [
+        b.errorStatus,
+        'api_error',
+        `HTTP ${b.errorStatus} (mock)`,
+      ];
+      return anthropicError(status, type, message);
+    }
     if (!body.max_tokens)
       return anthropicError(400, 'invalid_request_error', 'max_tokens: Field required');
 
     const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === 'user');
-    if ((body as { stream?: boolean }).stream) {
-      const userText = (lastUser?.content ?? [])
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join(' ');
-      const plan = streamPlan(model, `Mock reply to: ${userText}`.trim());
+    const userText = (lastUser?.content ?? [])
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text)
+      .join(' ');
+    const toolName = b.tool
+      ? (body.tools?.[0]?.name ?? body.tools?.[0]?.function?.name)
+      : undefined;
+    const inputTokens = estimateTokens(JSON.stringify(body.messages ?? []));
+    counter += 1;
+
+    if (body.stream) {
       const event = (type: string, data: object) =>
         `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-      const inputTokens = estimateTokens(JSON.stringify(body.messages ?? []));
-      counter += 1;
-      await writeStream(reply, history[0]!, plan, {
+      const toolJson = JSON.stringify({ query: userText });
+      const parts = toolName
+        ? [toolJson.slice(0, 8), toolJson.slice(8)]
+        : pieces(b, `Mock reply to: ${userText}`.trim());
+      await writeStream(reply, entry, b, {
         start: [
           event('message_start', {
             message: {
@@ -277,51 +378,53 @@ export function buildApp(
               usage: { input_tokens: inputTokens, output_tokens: 1 },
             },
           }),
-          event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+          event('content_block_start', {
+            index: 0,
+            content_block: toolName
+              ? { type: 'tool_use', id: `toolu_mock_${counter}`, name: toolName, input: {} }
+              : { type: 'text', text: '' },
+          }),
           event('ping', {}),
         ],
-        piece: (text) =>
-          event('content_block_delta', { index: 0, delta: { type: 'text_delta', text } }),
+        body: parts.map((p) =>
+          event('content_block_delta', {
+            index: 0,
+            delta: toolName
+              ? { type: 'input_json_delta', partial_json: p }
+              : { type: 'text_delta', text: p },
+          }),
+        ),
         end: [
           event('content_block_stop', { index: 0 }),
           event('message_delta', {
-            delta: { stop_reason: 'end_turn', stop_sequence: null },
-            usage: { output_tokens: estimateTokens(plan.pieces.join('')) },
+            delta: { stop_reason: toolName ? 'tool_use' : 'end_turn', stop_sequence: null },
+            ...(b.noUsage ? {} : { usage: { output_tokens: estimateTokens(parts.join('')) } }),
           }),
           event('message_stop', {}),
         ],
       });
       return reply;
     }
-    const userText = (lastUser?.content ?? [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join(' ');
-    const firstTool = body.tools?.[0];
-    const useTool = model.includes('tool') && firstTool;
-    const content = useTool
+
+    const content = toolName
       ? [
           {
             type: 'tool_use',
-            id: `toolu_mock_${counter + 1}`,
-            name: firstTool.name,
+            id: `toolu_mock_${counter}`,
+            name: toolName,
             input: { query: userText },
           },
         ]
       : [{ type: 'text', text: `Mock reply to: ${userText}`.trim() }];
-    counter += 1;
     return {
       id: `msg_mock_${counter}`,
       type: 'message',
       role: 'assistant',
       model,
       content,
-      stop_reason: useTool ? 'tool_use' : 'end_turn',
+      stop_reason: toolName ? 'tool_use' : 'end_turn',
       stop_sequence: null,
-      usage: {
-        input_tokens: estimateTokens(JSON.stringify(body.messages ?? [])),
-        output_tokens: estimateTokens(JSON.stringify(content)),
-      },
+      usage: { input_tokens: inputTokens, output_tokens: estimateTokens(JSON.stringify(content)) },
     };
   });
 
