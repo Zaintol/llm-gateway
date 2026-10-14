@@ -12,6 +12,7 @@
  *   gw budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]
  *   gw admin-token:create <name> --role <role> [--tenant <slug>]
  *   gw admin-jwt:mint --role <role> [--tenant <slug>] [--subject <email>] [--ttl <seconds>]
+ *   gw demo:seed [--days <n>]
  */
 import { userInfo } from 'node:os';
 import { ConfigError, loadConfig } from './config.js';
@@ -23,6 +24,7 @@ import {
   setCredential,
 } from './credentials/service.js';
 import { createAdminToken, mintAdminJwt } from './admin/auth.js';
+import { seedDemo } from './demo/seed.js';
 import { createRedis } from './redis.js';
 import {
   createApiKey,
@@ -47,7 +49,8 @@ const usage = `Usage:
   limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
   budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]
   admin-token:create <name> --role <platform_admin|tenant_admin|finance_viewer> [--tenant <slug>]
-  admin-jwt:mint --role <role> [--tenant <slug>] [--subject <email>] [--ttl <seconds>]`;
+  admin-jwt:mint --role <role> [--tenant <slug>] [--subject <email>] [--ttl <seconds>]
+  demo:seed [--days <n>]`;
 
 function adminRole(raw: string | undefined): AdminRole {
   if (raw === 'platform_admin' || raw === 'tenant_admin' || raw === 'finance_viewer') return raw;
@@ -282,6 +285,20 @@ try {
           ttl,
         ),
       );
+      break;
+    }
+    case 'demo:seed': {
+      const days = Number(flags(args).get('days') ?? 30);
+      if (!Number.isInteger(days) || days < 1 || days > 90) fail('--days must be 1 to 90');
+      const report = await seedDemo(db, actor, days);
+      console.log(
+        `Seeded ${report.events} usage events over ${days} days for: ${report.tenants.map((t) => t.slug).join(', ')}`,
+      );
+      console.log(
+        `DEMO_TENANT_ID=${report.tenants[0]!.id}   # read-only demo login shows this tenant`,
+      );
+      if (report.apiKey)
+        console.log(`Demo API key for ${report.tenants[0]!.slug}: ${report.apiKey}`);
       break;
     }
     default:

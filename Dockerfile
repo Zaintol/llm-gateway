@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# One multi-stage build for every Node service. Pick a service with --target (gateway, mock-provider).
+# One multi-stage build for every Node service. Pick a service with --target
+# (gateway, mock-provider, dashboard).
 
 FROM node:22-slim AS base
 ENV PNPM_HOME=/pnpm
@@ -38,3 +39,13 @@ EXPOSE 4000
 HEALTHCHECK --interval=5s --timeout=3s --retries=12 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "dist/server.js"]
+
+FROM runtime AS dashboard
+COPY --from=build --chown=node:node /repo/packages/dashboard/.next/standalone ./
+COPY --from=build --chown=node:node /repo/packages/dashboard/.next/static ./packages/dashboard/.next/static
+ENV PORT=3002
+ENV HOSTNAME=0.0.0.0
+EXPOSE 3002
+HEALTHCHECK --interval=5s --timeout=3s --retries=12 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:3002/login').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+CMD ["node", "packages/dashboard/server.js"]
