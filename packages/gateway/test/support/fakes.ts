@@ -2,7 +2,12 @@ import type { CatalogModel } from '../../src/catalog/catalog.js';
 import type { ChatCompletionRequest } from '@gw/schema';
 import type { CredentialSource } from '../../src/chat/route.js';
 import type { ResolvedCredential } from '../../src/credentials/service.js';
-import type { ProviderAdapter, ProviderCall, ProviderResult } from '../../src/providers/types.js';
+import type {
+  ProviderAdapter,
+  ProviderCall,
+  ProviderResult,
+  StreamEvent,
+} from '../../src/providers/types.js';
 import { Authenticator, type AuthenticatorOptions } from '../../src/auth/authenticator.js';
 import type { FailureLimiter } from '../../src/auth/failure-limiter.js';
 import type { KeyRecord, KeyStore } from '../../src/auth/key-store.js';
@@ -82,6 +87,22 @@ export class FakeAdapter implements ProviderAdapter {
   async complete(request: ChatCompletionRequest, call: ProviderCall) {
     this.calls.push({ request, call });
     return this.behaviour(request);
+  }
+
+  /** Streams the canned result's content as a single delta, then usage. */
+  async *stream(request: ChatCompletionRequest, call: ProviderCall): AsyncGenerator<StreamEvent> {
+    const result = await this.complete(request, call);
+    const choice = result.response.choices[0]!;
+    yield {
+      type: 'delta',
+      delta: {
+        role: 'assistant',
+        ...(choice.message.content ? { content: choice.message.content } : {}),
+      },
+      finishReason: null,
+    };
+    yield { type: 'delta', delta: {}, finishReason: choice.finish_reason };
+    yield { type: 'usage', usage: result.usage };
   }
 }
 

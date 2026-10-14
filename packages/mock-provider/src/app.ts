@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 
 /**
  * Fake OpenAI-compatible upstream for tests, load tests and the public demo.
@@ -16,10 +16,87 @@ import Fastify, { type FastifyInstance } from 'fastify';
  * POST /v1/messages speaks the Anthropic Messages API with the same failure modes, plus:
  *   *tool*          answers with a tool_use block for the first tool in the request
  *
- * GW-10.1 extends this with Anthropic/Gemini shapes, streaming and runtime fault injection.
+ *
+ * With `stream: true` both endpoints answer with server-sent events. Streaming modifiers:
+ *   *chunks-<n>*        emit n content chunks ("tok0 tok1 ...") instead of the echo reply
+ *   *chunk-delay-<ms>*  wait between chunks (default 2 ms)
+ *   *fail-after-<n>*    drop the connection after n chunks (mid-stream failure)
+ *   *stall-after-<n>*   stop sending after n chunks but keep the connection open (idle)
+ * Requests the client abandons mid-stream are recorded with `aborted: true` in /mock/requests.
+ *
+ * GW-10.1 extends this with Gemini shapes and runtime fault injection.
  */
 
-type RecordedRequest = { path: string; headers: Record<string, unknown>; body: unknown };
+type RecordedRequest = {
+  path: string;
+  headers: Record<string, unknown>;
+  body: unknown;
+  aborted?: boolean;
+  abortedAt?: number;
+};
+
+const numberAfter = (model: string, label: string) => {
+  const match = new RegExp(`${label}-(\\d+)`).exec(model);
+  return match ? Number(match[1]) : undefined;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type StreamPlan = { pieces: string[]; delayMs: number; failAfter?: number; stallAfter?: number };
+
+function streamPlan(model: string, replyText: string): StreamPlan {
+  const count = numberAfter(model, 'chunks');
+  const pieces = count
+    ? Array.from({ length: count }, (_, i) => `tok${i} `)
+    : replyText.split(/(?<= )/);
+  return {
+    pieces,
+    delayMs: numberAfter(model, 'chunk-delay') ?? 2,
+    ...(numberAfter(model, 'fail-after') !== undefined
+      ? { failAfter: numberAfter(model, 'fail-after')! }
+      : {}),
+    ...(numberAfter(model, 'stall-after') !== undefined
+      ? { stallAfter: numberAfter(model, 'stall-after')! }
+      : {}),
+  };
+}
+
+/**
+ * Writes SSE frames produced by `frames(i)` for each piece, honouring the failure modifiers.
+ * Returns once the stream ends, fails, stalls, or the client goes away.
+ */
+async function writeStream(
+  reply: FastifyReply,
+  entry: RecordedRequest,
+  plan: StreamPlan,
+  frames: { start: string[]; piece: (text: string, i: number) => string; end: string[] },
+) {
+  reply.hijack();
+  const res = reply.raw;
+  let closed = false;
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      closed = true;
+      entry.aborted = true;
+      entry.abortedAt = Date.now();
+    }
+  });
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+  for (const frame of frames.start) res.write(frame);
+  for (const [i, piece] of plan.pieces.entries()) {
+    if (closed) return;
+    if (plan.failAfter !== undefined && i >= plan.failAfter) {
+      res.destroy();
+      return;
+    }
+    if (plan.stallAfter !== undefined && i >= plan.stallAfter) return; // idle until the client leaves
+    res.write(frames.piece(piece, i));
+    await sleep(plan.delayMs);
+  }
+  if (closed) return;
+  for (const frame of frames.end) res.write(frame);
+  res.end();
+}
 
 const estimateTokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
 
@@ -103,6 +180,31 @@ export function buildApp(
     const promptTokens = estimateTokens(prompt);
     const completionTokens = estimateTokens(content);
     counter += 1;
+
+    if ((body as { stream?: boolean }).stream) {
+      const id = `chatcmpl-mock-${counter}`;
+      const plan = streamPlan(model, content);
+      const includeUsage =
+        (body as { stream_options?: { include_usage?: boolean } }).stream_options?.include_usage ===
+        true;
+      const chunk = (delta: object, finish: string | null, extra: object = {}) =>
+        `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
+      const streamed = plan.pieces.join('');
+      await writeStream(reply, history[0]!, plan, {
+        start: [chunk({ role: 'assistant', content: '' }, null)],
+        piece: (text) => chunk({ content: text }, null),
+        end: [
+          chunk({}, 'stop'),
+          ...(includeUsage && !model.includes('no-usage')
+            ? [
+                `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: estimateTokens(streamed), total_tokens: promptTokens + estimateTokens(streamed) } })}\n\n`,
+              ]
+            : []),
+          'data: [DONE]\n\n',
+        ],
+      });
+      return reply;
+    }
     return {
       id: `chatcmpl-mock-${counter}`,
       object: 'chat.completion',
@@ -153,6 +255,44 @@ export function buildApp(
       return anthropicError(400, 'invalid_request_error', 'max_tokens: Field required');
 
     const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === 'user');
+    if ((body as { stream?: boolean }).stream) {
+      const userText = (lastUser?.content ?? [])
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join(' ');
+      const plan = streamPlan(model, `Mock reply to: ${userText}`.trim());
+      const event = (type: string, data: object) =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+      const inputTokens = estimateTokens(JSON.stringify(body.messages ?? []));
+      counter += 1;
+      await writeStream(reply, history[0]!, plan, {
+        start: [
+          event('message_start', {
+            message: {
+              id: `msg_mock_${counter}`,
+              type: 'message',
+              role: 'assistant',
+              model,
+              content: [],
+              usage: { input_tokens: inputTokens, output_tokens: 1 },
+            },
+          }),
+          event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+          event('ping', {}),
+        ],
+        piece: (text) =>
+          event('content_block_delta', { index: 0, delta: { type: 'text_delta', text } }),
+        end: [
+          event('content_block_stop', { index: 0 }),
+          event('message_delta', {
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: estimateTokens(plan.pieces.join('')) },
+          }),
+          event('message_stop', {}),
+        ],
+      });
+      return reply;
+    }
     const userText = (lastUser?.content ?? [])
       .filter((b) => b.type === 'text')
       .map((b) => b.text)

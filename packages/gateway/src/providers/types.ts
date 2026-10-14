@@ -1,4 +1,4 @@
-import type { ChatCompletionRequest, ChatCompletionResponse } from '@gw/schema';
+import type { ChatCompletionRequest, ChatCompletionResponse, FinishReason } from '@gw/schema';
 import type { ResolvedCredential } from '../credentials/service.js';
 
 export type ProviderUsage = {
@@ -25,6 +25,26 @@ export type ProviderResult = {
   emulated?: string[];
 };
 
+/** Incremental assistant output, in OpenAI `chat.completion.chunk` delta shape. */
+export type StreamDelta = {
+  role?: 'assistant';
+  content?: string;
+  tool_calls?: Array<{
+    index: number;
+    id?: string;
+    type?: 'function';
+    function?: { name?: string; arguments?: string };
+  }>;
+};
+
+/**
+ * What an adapter's stream yields: content deltas as they arrive, then one final usage event.
+ * Errors are thrown as ProviderError from the iterator.
+ */
+export type StreamEvent =
+  | { type: 'delta'; delta: StreamDelta; finishReason: FinishReason | null }
+  | { type: 'usage'; usage: ProviderUsage };
+
 /**
  * One implementation per provider family. Adapters translate the canonical request to the
  * provider's wire format and back, and map every failure to a ProviderError so the execution
@@ -35,4 +55,6 @@ export interface ProviderAdapter {
   /** False for endpoints that need no API key (local models, the mock provider). */
   readonly requiresCredential: boolean;
   complete(request: ChatCompletionRequest, call: ProviderCall): Promise<ProviderResult>;
+  /** Streams the completion. The upstream request starts on the first `next()`. */
+  stream(request: ChatCompletionRequest, call: ProviderCall): AsyncIterable<StreamEvent>;
 }

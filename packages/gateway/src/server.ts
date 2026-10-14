@@ -93,7 +93,12 @@ const app = buildApp({
         backoffBaseMs: config.RETRY_BACKOFF_BASE_MS,
         backoffCapMs: config.RETRY_BACKOFF_CAP_MS,
         attemptTimeoutMs: config.PROVIDER_ATTEMPT_TIMEOUT_MS,
+        firstTokenTimeoutMs: config.PROVIDER_FIRST_TOKEN_TIMEOUT_MS,
       }),
+      stream: {
+        idleTimeoutMs: config.STREAM_IDLE_TIMEOUT_MS,
+        heartbeatMs: config.STREAM_HEARTBEAT_MS,
+      },
       deadline: {
         defaultMs: config.REQUEST_DEADLINE_DEFAULT_MS,
         maxMs: config.REQUEST_DEADLINE_MAX_MS,

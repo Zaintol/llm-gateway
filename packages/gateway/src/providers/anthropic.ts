@@ -7,8 +7,54 @@ import type {
 } from '@gw/schema';
 import { z } from 'zod';
 import { ProviderError } from './errors.js';
-import { postJson, resolveBaseUrl } from './http.js';
-import type { ProviderAdapter, ProviderCall, ProviderResult } from './types.js';
+import { openStream, postJson, resolveBaseUrl, streamReadError } from './http.js';
+import { estimateTokens } from './openai-compatible.js';
+import { parseSse } from './sse.js';
+import type { ProviderAdapter, ProviderCall, ProviderResult, StreamEvent } from './types.js';
+
+/** The subset of Anthropic stream events the gateway translates; others (ping) are ignored. */
+const streamEventSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('message_start'),
+    message: z.object({
+      usage: z.object({
+        input_tokens: z.number(),
+        cache_read_input_tokens: z.number().nullish(),
+        cache_creation_input_tokens: z.number().nullish(),
+      }),
+    }),
+  }),
+  z.object({
+    type: z.literal('content_block_start'),
+    index: z.number(),
+    content_block: z.object({
+      type: z.string(),
+      id: z.string().optional(),
+      name: z.string().optional(),
+    }),
+  }),
+  z.object({
+    type: z.literal('content_block_delta'),
+    index: z.number(),
+    delta: z.object({
+      type: z.string(),
+      text: z.string().optional(),
+      partial_json: z.string().optional(),
+    }),
+  }),
+  z.object({ type: z.literal('content_block_stop') }).loose(),
+  z.object({
+    type: z.literal('message_delta'),
+    delta: z.object({ stop_reason: z.string().nullish() }).loose(),
+    usage: z.object({ output_tokens: z.number() }).loose().optional(),
+  }),
+  z.object({ type: z.literal('message_stop') }).loose(),
+  z.object({ type: z.literal('ping') }).loose(),
+  z.object({
+    type: z.literal('error'),
+    error: z.object({ type: z.string(), message: z.string() }),
+  }),
+]);
 
 export const ANTHROPIC_VERSION = '2023-06-01';
 /** Used when neither the request nor the catalog sets max_tokens, which Anthropic requires. */
@@ -259,6 +305,116 @@ export class AnthropicAdapter implements ProviderAdapter {
     return {
       response,
       usage: { inputTokens, outputTokens, cachedInputTokens: cacheRead, source: 'provider' },
+    };
+  }
+
+  async *stream(request: ChatCompletionRequest, call: ProviderCall): AsyncGenerator<StreamEvent> {
+    const { body } = this.buildRequest(request, call);
+    const events = await openStream({
+      provider: this.provider,
+      url: `${resolveBaseUrl(this.provider, call, this.defaultBaseUrl)}/v1/messages`,
+      headers: {
+        'x-api-key': call.credential?.secret ?? '',
+        'anthropic-version': ANTHROPIC_VERSION,
+      },
+      body: { ...body, stream: true },
+      signal: call.signal,
+      fetch: this.fetch,
+    });
+
+    let inputTokens = 0;
+    let cachedInputTokens = 0;
+    let outputTokens: number | undefined;
+    let output = '';
+    // Anthropic numbers all content blocks; OpenAI numbers only tool calls.
+    const toolIndexByBlock = new Map<number, number>();
+    try {
+      for await (const raw of parseSse(events)) {
+        let json: unknown;
+        try {
+          json = JSON.parse(raw.data);
+        } catch {
+          throw new ProviderError(
+            'provider_error',
+            this.provider,
+            'Malformed stream event from provider',
+          );
+        }
+        const parsed = streamEventSchema.safeParse(json);
+        if (!parsed.success) continue; // unknown event types are forward-compatible no-ops
+        const event = parsed.data;
+        switch (event.type) {
+          case 'message_start': {
+            const u = event.message.usage;
+            cachedInputTokens = u.cache_read_input_tokens ?? 0;
+            inputTokens = u.input_tokens + cachedInputTokens + (u.cache_creation_input_tokens ?? 0);
+            yield { type: 'delta', delta: { role: 'assistant' }, finishReason: null };
+            break;
+          }
+          case 'content_block_start':
+            if (event.content_block.type === 'tool_use') {
+              const index = toolIndexByBlock.size;
+              toolIndexByBlock.set(event.index, index);
+              yield {
+                type: 'delta',
+                delta: {
+                  tool_calls: [
+                    {
+                      index,
+                      id: event.content_block.id ?? `call_${index}`,
+                      type: 'function',
+                      function: { name: event.content_block.name ?? '', arguments: '' },
+                    },
+                  ],
+                },
+                finishReason: null,
+              };
+            }
+            break;
+          case 'content_block_delta':
+            if (event.delta.type === 'text_delta' && event.delta.text) {
+              output += event.delta.text;
+              yield { type: 'delta', delta: { content: event.delta.text }, finishReason: null };
+            } else if (event.delta.type === 'input_json_delta' && event.delta.partial_json) {
+              const index = toolIndexByBlock.get(event.index);
+              if (index === undefined) break;
+              output += event.delta.partial_json;
+              yield {
+                type: 'delta',
+                delta: {
+                  tool_calls: [{ index, function: { arguments: event.delta.partial_json } }],
+                },
+                finishReason: null,
+              };
+            }
+            break;
+          case 'message_delta':
+            if (event.usage) outputTokens = event.usage.output_tokens;
+            if (event.delta.stop_reason) {
+              yield {
+                type: 'delta',
+                delta: {},
+                finishReason: finishReasons[event.delta.stop_reason] ?? 'stop',
+              };
+            }
+            break;
+          case 'error':
+            throw new ProviderError('provider_error', this.provider, event.error.message);
+          default:
+            break;
+        }
+      }
+    } catch (err) {
+      throw streamReadError(this.provider, err, call.signal);
+    }
+    yield {
+      type: 'usage',
+      usage: {
+        inputTokens: inputTokens || estimateTokens(JSON.stringify(request.messages)),
+        outputTokens: outputTokens ?? estimateTokens(output),
+        cachedInputTokens,
+        source: outputTokens === undefined || inputTokens === 0 ? 'estimated' : 'provider',
+      },
     };
   }
 

@@ -314,3 +314,115 @@ describe('AnthropicAdapter HTTP', () => {
     expect(err).toMatchObject({ kind: 'provider_error', retryable: true, message: 'Overloaded' });
   });
 });
+
+describe('AnthropicAdapter streaming', () => {
+  const sse = (events: object[]) =>
+    events
+      .map((e) => `event: ${(e as { type: string }).type}\ndata: ${JSON.stringify(e)}\n\n`)
+      .join('');
+
+  it('translates tool_use blocks into OpenAI tool_call deltas', async () => {
+    const http = new AnthropicAdapter({
+      fetch: async () =>
+        new Response(
+          sse([
+            {
+              type: 'message_start',
+              message: { usage: { input_tokens: 12, cache_read_input_tokens: 8 } },
+            },
+            { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+            {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'Checking.' },
+            },
+            {
+              type: 'content_block_start',
+              index: 1,
+              content_block: { type: 'tool_use', id: 'toolu_1', name: 'lookup' },
+            },
+            {
+              type: 'content_block_delta',
+              index: 1,
+              delta: { type: 'input_json_delta', partial_json: '{"q":' },
+            },
+            {
+              type: 'content_block_delta',
+              index: 1,
+              delta: { type: 'input_json_delta', partial_json: '"cats"}' },
+            },
+            {
+              type: 'message_delta',
+              delta: { stop_reason: 'tool_use' },
+              usage: { output_tokens: 9 },
+            },
+            { type: 'message_stop' },
+          ]),
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+    });
+    const events = [];
+    for await (const event of http.stream(
+      { model: 'anthropic/x', messages: [{ role: 'user', content: 'hi' }] },
+      { upstreamModel: 'x', credential: null, signal: new AbortController().signal },
+    )) {
+      events.push(event);
+    }
+    expect(events).toEqual([
+      { type: 'delta', delta: { role: 'assistant' }, finishReason: null },
+      { type: 'delta', delta: { content: 'Checking.' }, finishReason: null },
+      {
+        type: 'delta',
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'toolu_1',
+              type: 'function',
+              function: { name: 'lookup', arguments: '' },
+            },
+          ],
+        },
+        finishReason: null,
+      },
+      {
+        type: 'delta',
+        delta: { tool_calls: [{ index: 0, function: { arguments: '{"q":' } }] },
+        finishReason: null,
+      },
+      {
+        type: 'delta',
+        delta: { tool_calls: [{ index: 0, function: { arguments: '"cats"}' } }] },
+        finishReason: null,
+      },
+      { type: 'delta', delta: {}, finishReason: 'tool_calls' },
+      {
+        type: 'usage',
+        usage: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 8, source: 'provider' },
+      },
+    ]);
+  });
+
+  it('turns a mid-stream error event into a ProviderError', async () => {
+    const http = new AnthropicAdapter({
+      fetch: async () =>
+        new Response(
+          sse([
+            { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+            { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+          ]),
+        ),
+    });
+    const iterator = http
+      .stream(
+        { model: 'anthropic/x', messages: [{ role: 'user', content: 'hi' }] },
+        { upstreamModel: 'x', credential: null, signal: new AbortController().signal },
+      )
+      [Symbol.asyncIterator]();
+    await iterator.next();
+    await expect(iterator.next()).rejects.toMatchObject({
+      kind: 'provider_error',
+      message: 'Overloaded',
+    });
+  });
+});

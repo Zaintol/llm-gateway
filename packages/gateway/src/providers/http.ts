@@ -73,3 +73,54 @@ export async function postJson(options: {
     throw new ProviderError('provider_error', provider, 'Provider returned invalid JSON');
   }
 }
+
+/** Converts an error thrown while reading a stream into a ProviderError. */
+export function streamReadError(
+  provider: string,
+  err: unknown,
+  signal: AbortSignal,
+): ProviderError {
+  if (err instanceof ProviderError) return err;
+  if (signal.aborted) return timedOut(provider);
+  return new ProviderError(
+    'provider_error',
+    provider,
+    `${provider} stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
+  );
+}
+
+/** POSTs a streaming request and returns the event-stream body once the status is OK. */
+export async function openStream(options: {
+  provider: string;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+  signal: AbortSignal;
+  fetch: typeof fetch;
+}): Promise<AsyncIterable<Uint8Array>> {
+  const { provider, signal } = options;
+  let res: Response;
+  try {
+    res = await options.fetch(options.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+        ...options.headers,
+      },
+      body: JSON.stringify(options.body),
+      signal,
+    });
+  } catch (err) {
+    if (signal.aborted) throw timedOut(provider);
+    throw new ProviderError(
+      'provider_error',
+      provider,
+      `Could not reach ${provider}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!res.ok) throw await errorFromResponse(provider, res);
+  if (!res.body)
+    throw new ProviderError('provider_error', provider, `${provider} returned no stream body`);
+  return res.body as unknown as AsyncIterable<Uint8Array>;
+}
