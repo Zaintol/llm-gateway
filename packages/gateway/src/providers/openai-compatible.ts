@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from '@gw/schema';
 import { z } from 'zod';
-import { ProviderError, errorKindForStatus } from './errors.js';
+import { ProviderError } from './errors.js';
+import { postJson, resolveBaseUrl } from './http.js';
 import type { ProviderAdapter, ProviderCall, ProviderResult } from './types.js';
 
 const upstreamResponseSchema = z.object({
@@ -120,73 +121,16 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     return { response, usage };
   }
 
-  async mapError(res: Response): Promise<ProviderError> {
-    let message = `${this.provider} returned HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: { message?: unknown } };
-      if (typeof body.error?.message === 'string') message = body.error.message;
-    } catch {
-      // Non-JSON error body: keep the generic message.
-    }
-    const retryAfter = Number(res.headers.get('retry-after'));
-    return new ProviderError(
-      errorKindForStatus(res.status),
-      this.provider,
-      message,
-      res.status,
-      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
-    );
-  }
-
   async complete(request: ChatCompletionRequest, call: ProviderCall): Promise<ProviderResult> {
-    const baseUrl = (call.credential?.baseUrl ?? this.defaultBaseUrl)?.replace(/\/+$/, '');
-    if (!baseUrl) {
-      throw new ProviderError(
-        'provider_error',
-        this.provider,
-        `No base URL configured for ${this.provider}`,
-      );
-    }
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (call.credential) headers.authorization = `Bearer ${call.credential.secret}`;
-
-    let res: Response;
-    try {
-      res = await this.fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(this.buildRequest(request, call.upstreamModel)),
-        signal: call.signal,
-      });
-    } catch (err) {
-      if (call.signal.aborted) {
-        throw new ProviderError(
-          'provider_timeout',
-          this.provider,
-          `${this.provider} did not respond in time`,
-        );
-      }
-      throw new ProviderError(
-        'provider_error',
-        this.provider,
-        `Could not reach ${this.provider}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    if (!res.ok) throw await this.mapError(res);
-
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      if (call.signal.aborted) {
-        throw new ProviderError(
-          'provider_timeout',
-          this.provider,
-          `${this.provider} did not respond in time`,
-        );
-      }
-      throw new ProviderError('provider_error', this.provider, 'Provider returned invalid JSON');
-    }
+    const baseUrl = resolveBaseUrl(this.provider, call, this.defaultBaseUrl);
+    const body = await postJson({
+      provider: this.provider,
+      url: `${baseUrl}/chat/completions`,
+      headers: call.credential ? { authorization: `Bearer ${call.credential.secret}` } : {},
+      body: this.buildRequest(request, call.upstreamModel),
+      signal: call.signal,
+      fetch: this.fetch,
+    });
     return this.parseResponse(body, request);
   }
 }

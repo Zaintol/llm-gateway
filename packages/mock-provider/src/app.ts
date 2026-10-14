@@ -13,6 +13,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
  *   *slow-<ms>*     delays the response by <ms> milliseconds
  * Anything else answers 200 with a deterministic reply.
  *
+ * POST /v1/messages speaks the Anthropic Messages API with the same failure modes, plus:
+ *   *tool*          answers with a tool_use block for the first tool in the request
+ *
  * GW-10.1 extends this with Anthropic/Gemini shapes, streaming and runtime fault injection.
  */
 
@@ -122,6 +125,63 @@ export function buildApp(
               total_tokens: promptTokens + completionTokens,
             },
           }),
+    };
+  });
+
+  app.post('/v1/messages', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      model?: string;
+      messages?: Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+      tools?: Array<{ name: string }>;
+      max_tokens?: number;
+    };
+    history.unshift({ path: request.url, headers: request.headers, body });
+    history.length = Math.min(history.length, options.historySize ?? 50);
+
+    const model = body.model ?? 'mock';
+    const anthropicError = (status: number, type: string, message: string) =>
+      reply.code(status).send({ type: 'error', error: { type, message } });
+    if (model.includes('rate-limit'))
+      return anthropicError(429, 'rate_limit_error', 'Rate limited (mock)');
+    if (model.includes('server-error'))
+      return anthropicError(529, 'overloaded_error', 'Overloaded (mock)');
+    if (model.includes('bad-request'))
+      return anthropicError(400, 'invalid_request_error', 'Bad request (mock)');
+    if (model.includes('unauthorized'))
+      return anthropicError(401, 'authentication_error', 'invalid x-api-key (mock)');
+    if (!body.max_tokens)
+      return anthropicError(400, 'invalid_request_error', 'max_tokens: Field required');
+
+    const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === 'user');
+    const userText = (lastUser?.content ?? [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join(' ');
+    const firstTool = body.tools?.[0];
+    const useTool = model.includes('tool') && firstTool;
+    const content = useTool
+      ? [
+          {
+            type: 'tool_use',
+            id: `toolu_mock_${counter + 1}`,
+            name: firstTool.name,
+            input: { query: userText },
+          },
+        ]
+      : [{ type: 'text', text: `Mock reply to: ${userText}`.trim() }];
+    counter += 1;
+    return {
+      id: `msg_mock_${counter}`,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content,
+      stop_reason: useTool ? 'tool_use' : 'end_turn',
+      stop_sequence: null,
+      usage: {
+        input_tokens: estimateTokens(JSON.stringify(body.messages ?? [])),
+        output_tokens: estimateTokens(JSON.stringify(content)),
+      },
     };
   });
 

@@ -47,6 +47,8 @@ services:
       GATEWAY_MASTER_KEY_VERSION: ${GATEWAY_MASTER_KEY_VERSION:-1}
       GATEWAY_PREVIOUS_MASTER_KEYS: ${GATEWAY_PREVIOUS_MASTER_KEYS:-}
       MOCK_PROVIDER_BASE_URL: http://mock-provider:4000/v1
+      # Used by local/* models when the local-models profile (Ollama) is running.
+      LOCAL_MODELS_BASE_URL: http://ollama:11434/v1
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     depends_on:
       migrate: { condition: service_completed_successfully }

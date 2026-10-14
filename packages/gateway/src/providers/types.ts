@@ -14,11 +14,15 @@ export type ProviderCall = {
   upstreamModel: string;
   credential: ResolvedCredential | null;
   signal: AbortSignal;
+  /** Catalog output limit, used where a provider requires max_tokens (GW-6.1 fills this in). */
+  maxOutputTokens?: number;
 };
 
 export type ProviderResult = {
   response: ChatCompletionResponse;
   usage: ProviderUsage;
+  /** Features the gateway simulated because the provider lacks them natively, e.g. `json_mode`. */
+  emulated?: string[];
 };
 
 /**
