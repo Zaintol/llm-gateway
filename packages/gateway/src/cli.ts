@@ -9,6 +9,7 @@
  *   gw credential:list <tenant-slug|--platform>
  *   gw credentials:reencrypt
  *   gw limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
+ *   gw budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]
  */
 import { userInfo } from 'node:os';
 import { ConfigError, loadConfig } from './config.js';
@@ -26,6 +27,7 @@ import {
   findTenantBySlug,
   listApiKeys,
   revokeApiKey,
+  setBudget,
   setRateLimits,
   type Actor,
 } from './tenancy/service.js';
@@ -38,7 +40,17 @@ const usage = `Usage:
   credential:set <tenant-slug|--platform> <provider> <label> [--base-url <url>]   (secret on stdin)
   credential:list <tenant-slug|--platform>
   credentials:reencrypt
-  limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]`;
+  limits:set <tenant-slug> [--key <prefix>] [--rpm <n|none>] [--tpm <n|none>]
+  budget:set <tenant-slug> <daily|monthly> [--hard <usd|none>] [--soft <usd|none>]`;
+
+function usdValue(raw: string | undefined, name: string): bigint | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === 'none') return null;
+  if (!/^\d+(\.\d{1,6})?$/.test(raw))
+    fail(`--${name} must be a USD amount like 25 or 0.50, or "none"`);
+  const [whole, fraction = ''] = raw.split('.');
+  return BigInt(whole!) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
+}
 
 /** Reads `--flag value` pairs into a map. */
 function flags(args: string[]): Map<string, string> {
@@ -210,6 +222,26 @@ try {
       console.log(
         `Rate limits updated for ${f.get('key') ? `key ${f.get('key')}` : `tenant ${slug}`}`,
       );
+      break;
+    }
+    case 'budget:set': {
+      const [slug, period, ...rest] = args;
+      if (period !== 'daily' && period !== 'monthly') fail(usage);
+      const f = flags(rest);
+      const hard = usdValue(f.get('hard'), 'hard');
+      const soft = usdValue(f.get('soft'), 'soft');
+      if (hard === undefined && soft === undefined) fail(usage);
+      await setBudget(
+        db,
+        {
+          tenantId: await tenantId(slug),
+          period,
+          ...(hard !== undefined ? { hardLimitMicros: hard } : {}),
+          ...(soft !== undefined ? { softLimitMicros: soft } : {}),
+        },
+        actor,
+      );
+      console.log(`${period} budget updated for ${slug}`);
       break;
     }
     default:

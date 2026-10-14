@@ -10,6 +10,8 @@ import { chatRoutes } from './chat/route.js';
 import { ExecutionEngine } from './execution/engine.js';
 import { createUsageQueue } from './metering/queue.js';
 import { RedisRateLimiter } from './ratelimit/limiter.js';
+import { BudgetLedger } from './budget/ledger.js';
+import { BudgetService, PgBudgetSource, reconcileBudgets } from './budget/service.js';
 import { QueueUsageRecorder } from './metering/recorder.js';
 import { SpillFile } from './metering/spill.js';
 import { providerFetch } from './providers/fetch.js';
@@ -88,6 +90,11 @@ const usageRecorder = new QueueUsageRecorder(usageQueue, new SpillFile(config.US
   error: (obj, msg) => app.log.error(obj, msg),
 });
 
+const budgetLedger = new BudgetLedger(redis, config.BUDGET_LEASE_MS);
+const budgetService = new BudgetService(budgetLedger, new PgBudgetSource(db), (err) =>
+  app.log.warn({ err }, 'budget ledger unavailable'),
+);
+
 const app = buildApp({
   logLevel: config.LOG_LEVEL,
   trustProxy: config.TRUST_PROXY,
@@ -114,6 +121,7 @@ const app = buildApp({
         heartbeatMs: config.STREAM_HEARTBEAT_MS,
       },
       usage: usageRecorder,
+      budgets: budgetService,
       rateLimiter: new RedisRateLimiter(redis, (err) =>
         app.log.warn({ err }, 'rate limiter unavailable; admitting requests without limits'),
       ),
@@ -142,6 +150,36 @@ const replaySpill = () =>
 void replaySpill();
 const spillTimer = setInterval(replaySpill, 60_000);
 spillTimer.unref();
+
+// Refund reservations orphaned by crashed instances.
+const sweepTimer = setInterval(() => {
+  budgetLedger
+    .sweep()
+    .then((n) => n > 0 && app.log.warn({ refunded: n }, 'refunded expired budget reservations'))
+    .catch((err: unknown) => app.log.warn({ err }, 'budget sweep failed'));
+}, config.BUDGET_SWEEP_INTERVAL_MS);
+sweepTimer.unref();
+
+// Rebuild budget counters from Postgres. A short Redis lock keeps it to one instance per run.
+const reconcile = async () => {
+  try {
+    const lock = await redis.set(
+      'gw:budget:reconcile:lock',
+      String(process.pid),
+      'PX',
+      config.BUDGET_RECONCILE_INTERVAL_MS - 1_000,
+      'NX',
+    );
+    if (lock !== 'OK') return;
+    const count = await reconcileBudgets(db, budgetLedger);
+    app.log.info({ tenants: count }, 'reconciled budget counters');
+  } catch (err) {
+    app.log.warn({ err }, 'budget reconciliation failed; will retry');
+  }
+};
+setTimeout(() => void reconcile(), 5_000).unref();
+const reconcileTimer = setInterval(() => void reconcile(), config.BUDGET_RECONCILE_INTERVAL_MS);
+reconcileTimer.unref();
 subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
   app.log.warn({ err }, 'auth invalidation subscription failed; relying on cache TTL'),
 );
@@ -150,6 +188,8 @@ async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');
   catalog.stop();
   clearInterval(spillTimer);
+  clearInterval(sweepTimer);
+  clearInterval(reconcileTimer);
   await app.close();
   await usageRecorder.flush();
   await usageQueue.close();

@@ -8,9 +8,10 @@ import { ExecutionEngine, ExecutionFailure, type CandidateFailure } from '../exe
 import type { ProviderError } from '../providers/errors.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { estimateTokens } from '../providers/openai-compatible.js';
-import { planCandidates } from '../routing/planner.js';
+import { planCandidates, type Candidate } from '../routing/planner.js';
 import { buildUsageEvent, type UsageEventInput } from '../metering/event.js';
 import { noopRateLimiter, type RateLimiter } from '../ratelimit/limiter.js';
+import { worstCaseCostMicros, type BudgetService, type Reservation } from '../budget/service.js';
 import { estimatePromptTokens } from '../routing/tokens.js';
 import { noopRecorder, type UsageRecorder } from '../metering/recorder.js';
 import { sendStream, type StreamOptions, type StreamStatus } from './stream.js';
@@ -34,6 +35,7 @@ export type ChatRouteDeps = {
   stream?: StreamOptions;
   usage?: UsageRecorder;
   rateLimiter?: RateLimiter;
+  budgets?: BudgetService;
 };
 
 /**
@@ -113,6 +115,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
   const streamOptions = deps.stream ?? { idleTimeoutMs: 30_000, heartbeatMs: 15_000 };
   const usage = deps.usage ?? noopRecorder;
   const rateLimiter = deps.rateLimiter ?? noopRateLimiter;
+  const budgets = deps.budgets;
 
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
@@ -166,36 +169,55 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       });
       reply.headers(admission.headers);
 
-      // Every request that reaches a provider is metered, whatever its outcome.
+      // Rate limit tokens and budget reservations are settled exactly once: with actual usage when
+      // the request is metered, or released in `finally` if it ends before reaching that point.
+      let settled = false;
+      let reservation: Reservation | null = null;
       const meter = (
         outcome: Pick<UsageEventInput, 'status' | 'model' | 'attempts' | 'usage' | 'ttftMs'>,
       ) => {
+        settled = true;
         const billed = outcome.usage;
         void rateLimiter.settle(admission, billed ? billed.inputTokens + billed.outputTokens : 0);
         try {
-          usage.record(
-            buildUsageEvent({
-              ...outcome,
-              requestId: request.id,
-              tenantId: auth.tenantId,
-              apiKeyId: auth.keyId,
-              requestedModel: body.model,
-              firstCandidateId: plan.candidates[0]!.id,
-              startedAt,
-              finishedAt: new Date(),
-              routeReason: plan.virtual
-                ? `policy:${body.model}`
-                : body.gateway?.fallback
-                  ? 'concrete+fallback'
-                  : 'concrete',
-            }),
-          );
+          const event = buildUsageEvent({
+            ...outcome,
+            requestId: request.id,
+            tenantId: auth.tenantId,
+            apiKeyId: auth.keyId,
+            requestedModel: body.model,
+            firstCandidateId: plan.candidates[0]!.id,
+            startedAt,
+            finishedAt: new Date(),
+            routeReason: plan.virtual
+              ? `policy:${body.model}`
+              : body.gateway?.fallback
+                ? 'concrete+fallback'
+                : 'concrete',
+          });
+          void budgets?.settle(reservation, BigInt(event.costMicros));
+          usage.record(event);
         } catch (err) {
+          void budgets?.settle(reservation, 0n);
           request.log.error({ err }, 'failed to build usage event');
         }
       };
 
       try {
+        reservation =
+          (await budgets?.reserve({
+            requestId: request.id,
+            tenantId: auth.tenantId,
+            at: startedAt,
+            amountMicros: worstCaseCostMicros(body, plan.candidates[0]!, startedAt),
+          })) ?? null;
+        // Falling back to a pricier model first reserves the difference (402 if it does not fit).
+        const hooks = {
+          beforeCandidate: (candidate: Candidate) =>
+            budgets?.ensure(reservation, worstCaseCostMicros(body, candidate, startedAt)) ??
+            Promise.resolve(),
+        };
+
         if (body.stream) {
           // Fallback is possible only until the first event; after that the stream is committed.
           const stream = await engine.executeStream(
@@ -203,6 +225,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             plan.candidates,
             deadlineAt,
             client.signal,
+            hooks,
           );
           const ttftMs = Date.now() - startedAt.getTime();
           const outcome = await sendStream({
@@ -245,6 +268,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
           plan.candidates,
           deadlineAt,
           client.signal,
+          hooks,
         );
         if (attempts.length > 1)
           request.log.info({ attempts }, 'request needed retries or fallback');
@@ -271,6 +295,11 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
           throw failureToGatewayError(err, deadlineMs);
         }
         throw err;
+      } finally {
+        if (!settled) {
+          void rateLimiter.settle(admission, 0);
+          void budgets?.settle(reservation, 0n);
+        }
       }
     });
   };
