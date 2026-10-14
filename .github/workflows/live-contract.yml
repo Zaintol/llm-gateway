@@ -1,0 +1,37 @@
+name: Live provider contract
+
+# Manual check of the adapters against the real OpenAI and Anthropic APIs (costs well under a cent).
+# Add OPENAI_API_KEY and/or ANTHROPIC_API_KEY as repository secrets to enable it.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Skip when no provider keys are configured
+        id: keys
+        run: |
+          if [ -z "$OPENAI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::Skipping live contract: no OPENAI_API_KEY or ANTHROPIC_API_KEY secret is configured."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.keys.outputs.run == 'true'
+        uses: actions/checkout@v4
+      - if: steps.keys.outputs.run == 'true'
+        uses: pnpm/action-setup@v4
+      - if: steps.keys.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: pnpm }
+      - if: steps.keys.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.keys.outputs.run == 'true'
+        run: pnpm --filter @gw/gateway test:live

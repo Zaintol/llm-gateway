@@ -114,3 +114,94 @@ describe('mock provider: anthropic messages', () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+describe('mock provider: fault rules', () => {
+  const post = (model: string, extra: Record<string, unknown> = {}) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { model, messages: [{ role: 'user', content: 'hi' }], ...extra },
+    });
+
+  it('applies a matching fault rule until it is cleared', async () => {
+    app = buildApp({ logLevel: 'silent' });
+    await app.inject({
+      method: 'POST',
+      url: '/mock/faults',
+      payload: { match: 'primary', status: 503 },
+    });
+    expect((await post('primary-model')).statusCode).toBe(503);
+    expect((await post('other-model')).statusCode).toBe(200);
+    await app.inject({ method: 'DELETE', url: '/mock/faults' });
+    expect((await post('primary-model')).statusCode).toBe(200);
+  });
+
+  it('honours an error rate', async () => {
+    let n = 0;
+    app = buildApp({ logLevel: 'silent', random: () => (n++ % 2 === 0 ? 0.1 : 0.9) });
+    await app.inject({
+      method: 'POST',
+      url: '/mock/faults',
+      payload: { match: '*', status: 500, errorRate: 0.5 },
+    });
+    const statuses = [];
+    for (let i = 0; i < 4; i++) statuses.push((await post('any')).statusCode);
+    expect(statuses).toEqual([500, 200, 500, 200]);
+  });
+
+  it('drops usage when a rule says so', async () => {
+    app = buildApp({ logLevel: 'silent' });
+    await app.inject({
+      method: 'POST',
+      url: '/mock/faults',
+      payload: { match: '*', noUsage: true },
+    });
+    expect((await post('any')).json().usage).toBeUndefined();
+  });
+
+  it('rejects a rule without a match', async () => {
+    app = buildApp({ logLevel: 'silent' });
+    expect(
+      (await app.inject({ method: 'POST', url: '/mock/faults', payload: { status: 500 } }))
+        .statusCode,
+    ).toBe(400);
+  });
+});
+
+describe('mock provider: OpenAI tool calls and statuses', () => {
+  it('returns a tool call for a tool model', async () => {
+    app = buildApp({ logLevel: 'silent' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'mock-tool',
+        messages: [{ role: 'user', content: 'paris' }],
+        tools: [{ type: 'function', function: { name: 'weather' } }],
+      },
+    });
+    expect(res.json().choices[0]).toMatchObject({
+      message: {
+        content: null,
+        tool_calls: [
+          { type: 'function', function: { name: 'weather', arguments: '{"query":"paris"}' } },
+        ],
+      },
+      finish_reason: 'tool_calls',
+    });
+  });
+
+  it.each([
+    ['forbidden', 403],
+    ['not-found', 404],
+    ['status-418', 418],
+  ])('maps %s to HTTP %i', async (name, status) => {
+    app = buildApp({ logLevel: 'silent' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { model: `m-${name}`, messages: [] },
+    });
+    expect(res.statusCode).toBe(status);
+  });
+});
