@@ -55,6 +55,8 @@ export const gatewayOptionsSchema = z.object({
   min_quality_tier: z.number().int().min(1).max(3).optional(),
   latency_tier: z.enum(['fast', 'standard', 'slow']).optional(),
   max_cost_usd: z.number().positive().optional(),
+  /** For a concrete model: append the tenant's default fallback chain after it. */
+  fallback: z.boolean().optional(),
 });
 
 export const chatCompletionRequestSchema = z.object({

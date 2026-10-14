@@ -34,7 +34,6 @@ beforeAll(async () => {
         credentials: new StaticCredentials({
           openai: { secret: 'sk-upstream-test', baseUrl: `${upstreamUrl}/v1`, scope: 'tenant' },
         }),
-        providerTimeoutMs: 5000,
       }),
     ],
   });

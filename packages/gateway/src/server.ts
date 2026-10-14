@@ -7,6 +7,8 @@ import { PgKeyStore } from './auth/key-store.js';
 import { PgCatalog } from './catalog/catalog.js';
 import { modelsRoutes } from './catalog/route.js';
 import { chatRoutes } from './chat/route.js';
+import { ExecutionEngine } from './execution/engine.js';
+import { providerFetch } from './providers/fetch.js';
 import { CredentialResolver, keyProviderFromConfig } from './credentials/service.js';
 import { AnthropicAdapter } from './providers/anthropic.js';
 import { OpenAiCompatibleAdapter } from './providers/openai-compatible.js';
@@ -44,10 +46,15 @@ const failureLimiter = new RedisFailureLimiter(redis, {
 const catalog = new PgCatalog(db, {
   onError: (err) => app.log.warn({ err }, 'model catalog refresh failed'),
 });
+const fetchUpstream = providerFetch({ connectTimeoutMs: config.PROVIDER_CONNECT_TIMEOUT_MS });
 const providers = new ProviderRegistry(
   [
-    new OpenAiCompatibleAdapter({ provider: 'openai', defaultBaseUrl: config.OPENAI_BASE_URL }),
-    new AnthropicAdapter({ defaultBaseUrl: config.ANTHROPIC_BASE_URL }),
+    new OpenAiCompatibleAdapter({
+      provider: 'openai',
+      defaultBaseUrl: config.OPENAI_BASE_URL,
+      fetch: fetchUpstream,
+    }),
+    new AnthropicAdapter({ defaultBaseUrl: config.ANTHROPIC_BASE_URL, fetch: fetchUpstream }),
     // Local models need no key; the endpoint comes from a credential row or LOCAL_MODELS_BASE_URL.
     new OpenAiCompatibleAdapter({
       provider: 'local',
@@ -77,7 +84,21 @@ const app = buildApp({
   auth: { authenticator, failureLimiter },
   dataPlaneRoutes: [
     modelsRoutes({ catalog, providers }),
-    chatRoutes({ providers, credentials, providerTimeoutMs: config.PROVIDER_TIMEOUT_MS }),
+    chatRoutes({
+      providers,
+      catalog,
+      credentials,
+      engine: new ExecutionEngine({
+        maxRetries: config.RETRY_MAX_RETRIES,
+        backoffBaseMs: config.RETRY_BACKOFF_BASE_MS,
+        backoffCapMs: config.RETRY_BACKOFF_CAP_MS,
+        attemptTimeoutMs: config.PROVIDER_ATTEMPT_TIMEOUT_MS,
+      }),
+      deadline: {
+        defaultMs: config.REQUEST_DEADLINE_DEFAULT_MS,
+        maxMs: config.REQUEST_DEADLINE_MAX_MS,
+      },
+    }),
   ],
 });
 

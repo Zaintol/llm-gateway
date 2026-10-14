@@ -1,9 +1,13 @@
 import { chatCompletionRequestSchema, knownRequestFields } from '@gw/schema';
 import type { FastifyPluginAsync } from 'fastify';
+import type { ModelCatalog } from '../catalog/catalog.js';
 import type { ResolvedCredential } from '../credentials/service.js';
 import { GatewayError } from '../errors.js';
-import { ProviderError } from '../providers/errors.js';
+import { effectiveDeadlineMs, type DeadlineOptions } from '../execution/deadline.js';
+import { ExecutionEngine, ExecutionFailure, type CandidateFailure } from '../execution/engine.js';
+import type { ProviderError } from '../providers/errors.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import { planCandidates } from '../routing/planner.js';
 
 export interface CredentialSource {
   resolve(tenantId: string, provider: string): Promise<ResolvedCredential | null>;
@@ -11,9 +15,10 @@ export interface CredentialSource {
 
 export type ChatRouteDeps = {
   providers: ProviderRegistry;
+  catalog?: ModelCatalog;
   credentials: CredentialSource;
-  /** Overall deadline for the upstream call. Per-attempt timeouts and retries arrive in GW-3.1. */
-  providerTimeoutMs: number;
+  engine?: ExecutionEngine;
+  deadline?: DeadlineOptions;
 };
 
 /** Upstream failures as the client sees them. */
@@ -51,9 +56,49 @@ function describeIssue(issue: { path: PropertyKey[]; message: string }): string 
   return path ? `${path}: ${issue.message}` : issue.message;
 }
 
+const describeFailure = (f: CandidateFailure) =>
+  `${f.candidate.id}: ${f.error.kind}${f.error.upstreamStatus ? ` (HTTP ${f.error.upstreamStatus})` : ''} after ${f.attempts} attempt${f.attempts === 1 ? '' : 's'}`;
+
+/** Client-facing error for a failed execution, carrying the attempt count. */
+export function failureToGatewayError(failure: ExecutionFailure, deadlineMs: number): GatewayError {
+  const headers = { 'x-gateway-attempts': String(failure.attempts.length) };
+  const withHeaders = (err: GatewayError) =>
+    new GatewayError(err.status, err.type, err.code, err.message, { ...err.headers, ...headers });
+
+  if (failure.terminal) return withHeaders(toGatewayError(failure.terminal));
+  if (failure.deadlineExceeded) {
+    const tried = failure.failures.map(describeFailure).join('; ');
+    return new GatewayError(
+      504,
+      'provider_timeout',
+      'deadline_exceeded',
+      `Request deadline of ${deadlineMs}ms exceeded${tried ? `: ${tried}` : ''}`,
+      headers,
+    );
+  }
+  if (failure.failures.length === 1) return withHeaders(toGatewayError(failure.failures[0]!.error));
+  return new GatewayError(
+    502,
+    'provider_error',
+    'all_candidates_failed',
+    `All ${failure.failures.length} candidates failed: ${failure.failures.map(describeFailure).join('; ')}`,
+    headers,
+  );
+}
+
 export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
+  const engine = deps.engine ?? new ExecutionEngine();
+  const deadlineOptions = deps.deadline ?? { defaultMs: 60_000, maxMs: 300_000 };
+
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
+      const deadlineMs = effectiveDeadlineMs(
+        request.headers['x-gateway-timeout-ms'],
+        deadlineOptions,
+      );
+      const deadlineAt = Date.now() + deadlineMs;
+      reply.header('x-gateway-deadline-ms', String(deadlineMs));
+
       const parsed = chatCompletionRequestSchema.safeParse(request.body);
       if (!parsed.success) {
         throw new GatewayError(
@@ -78,39 +123,37 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         );
       }
 
-      const model = deps.providers.resolve(body.model);
       const auth = request.auth!;
-      const credential = await deps.credentials.resolve(auth.tenantId, model.provider);
-      if (model.adapter.requiresCredential && !credential) {
-        throw new GatewayError(
-          400,
-          'no_eligible_model',
-          'provider_not_configured',
-          `No ${model.provider} credential is configured for this tenant`,
-        );
-      }
+      const plan = await planCandidates({
+        request: body,
+        registry: deps.providers,
+        ...(deps.catalog ? { catalog: deps.catalog } : {}),
+        credentials: deps.credentials,
+        tenantId: auth.tenantId,
+        tenantSettings: auth.tenantSettings,
+      });
+      if (plan.skipped.length)
+        request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
       try {
-        const result = await model.adapter.complete(body, {
-          upstreamModel: model.upstreamModel,
-          credential,
-          signal: AbortSignal.timeout(deps.providerTimeoutMs),
-          ...(model.model ? { maxOutputTokens: model.model.maxOutputTokens } : {}),
-        });
+        const { result, served, attempts } = await engine.execute(
+          body,
+          plan.candidates,
+          deadlineAt,
+        );
+        if (attempts.length > 1)
+          request.log.info({ attempts }, 'request needed retries or fallback');
         reply.headers({
-          'x-gateway-provider': model.provider,
-          'x-gateway-model': model.id,
-          'x-gateway-attempts': '1',
+          'x-gateway-provider': served.provider,
+          'x-gateway-model': served.id,
+          'x-gateway-attempts': String(attempts.length),
           ...(result.emulated?.length ? { 'x-gateway-emulated': result.emulated.join(',') } : {}),
         });
-        return result.response;
+        return { ...result.response, model: served.id };
       } catch (err) {
-        if (err instanceof ProviderError) {
-          request.log.warn(
-            { provider: err.provider, kind: err.kind, upstreamStatus: err.upstreamStatus },
-            'provider call failed',
-          );
-          throw toGatewayError(err);
+        if (err instanceof ExecutionFailure) {
+          request.log.warn({ attempts: err.attempts }, 'all attempts failed');
+          throw failureToGatewayError(err, deadlineMs);
         }
         throw err;
       }

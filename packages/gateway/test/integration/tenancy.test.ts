@@ -71,7 +71,6 @@ beforeAll(async () => {
           }),
         ]),
         credentials: new StaticCredentials(),
-        providerTimeoutMs: 5000,
       }),
     ],
   });
