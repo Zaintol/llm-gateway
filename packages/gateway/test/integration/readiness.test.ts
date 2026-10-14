@@ -8,6 +8,7 @@ import { buildApp } from '../../src/app.js';
 import { createPool } from '../../src/db/client.js';
 import { postgresCheck, redisCheck } from '../../src/readiness.js';
 import { createRedis } from '../../src/redis.js';
+import { fakeAuth } from '../support/fakes.js';
 
 let postgres: StartedPostgreSqlContainer;
 let redisContainer: StartedRedisContainer;
@@ -28,6 +29,7 @@ beforeAll(async () => {
     logLevel: 'silent',
     readinessTimeoutMs: 1000,
     readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
+    auth: fakeAuth().auth,
   });
 });
 

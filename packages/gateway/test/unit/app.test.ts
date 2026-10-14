@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import type { DependencyCheck } from '../../src/readiness.js';
+import { fakeAuth } from '../support/fakes.js';
 
 const ok: DependencyCheck = async () => {};
 const down: DependencyCheck = async () => {
@@ -13,7 +14,12 @@ let app: FastifyInstance;
 afterEach(() => app?.close());
 
 function make(checks: Record<string, DependencyCheck>) {
-  app = buildApp({ logLevel: 'silent', readinessChecks: checks, readinessTimeoutMs: 50 });
+  app = buildApp({
+    logLevel: 'silent',
+    readinessChecks: checks,
+    readinessTimeoutMs: 50,
+    auth: fakeAuth().auth,
+  });
   return app;
 }
 
@@ -64,14 +70,14 @@ describe('request ids', () => {
 
 describe('unknown routes', () => {
   it('return the OpenAI error envelope and echo the request id', async () => {
-    const res = await make({}).inject({ url: '/v1/nope', headers: { 'x-request-id': 'req_123' } });
+    const res = await make({}).inject({ url: '/nope', headers: { 'x-request-id': 'req_123' } });
     expect(res.statusCode).toBe(404);
     expect(res.headers['x-request-id']).toBe('req_123');
     expect(res.json()).toEqual({
       error: {
-        type: 'invalid_request_error',
+        type: 'not_found',
         code: 'not_found',
-        message: 'Route GET /v1/nope not found',
+        message: 'Route GET /nope not found',
       },
     });
   });

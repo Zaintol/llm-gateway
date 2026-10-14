@@ -15,6 +15,13 @@
       "when": 1791968267138,
       "tag": "0001_usage_events_partitions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791970034233,
+      "tag": "0002_api_keys_created_by",
+      "breakpoints": true
     }
   ]
 }

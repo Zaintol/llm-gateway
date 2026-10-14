@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "migrate:dev": "node --conditions=@gw/source --import tsx src/db/migrate.ts"
+    "migrate:dev": "node --conditions=@gw/source --import tsx src/db/migrate.ts",
+    "cli": "node dist/cli.js",
+    "cli:dev": "node --conditions=@gw/source --import tsx src/cli.ts"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^12.2.1",

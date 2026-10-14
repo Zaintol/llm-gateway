@@ -1,7 +1,11 @@
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { buildApp } from './app.js';
-import { createPool } from './db/client.js';
-import { createRedis } from './redis.js';
+import { Authenticator } from './auth/authenticator.js';
+import { RedisFailureLimiter } from './auth/failure-limiter.js';
+import { subscribeToKeyInvalidations } from './auth/invalidation.js';
+import { PgKeyStore } from './auth/key-store.js';
+import { createDb, createPool } from './db/client.js';
+import { createRedis, createSubscriber } from './redis.js';
 import { postgresCheck, redisCheck } from './readiness.js';
 
 function readConfig(): Config {
@@ -19,24 +23,39 @@ function readConfig(): Config {
 
 const config = readConfig();
 const pool = createPool(config.DATABASE_URL);
+const db = createDb(pool);
 const redis = createRedis(config.REDIS_URL);
+const subscriber = createSubscriber(config.REDIS_URL);
+
+const authenticator = new Authenticator(new PgKeyStore(db), {
+  onTouchError: (err) => app.log.warn({ err }, 'failed to update api key last_used_at'),
+});
+const failureLimiter = new RedisFailureLimiter(redis, {
+  onError: (err) => app.log.warn({ err }, 'auth failure limiter unavailable; failing open'),
+});
 
 const app = buildApp({
   logLevel: config.LOG_LEVEL,
+  trustProxy: config.TRUST_PROXY,
   readinessTimeoutMs: config.READINESS_TIMEOUT_MS,
   readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
+  auth: { authenticator, failureLimiter },
 });
 
 redis.on('error', (err) => app.log.warn({ err: err.message }, 'redis connection error'));
+subscriber.on('error', (err) => app.log.warn({ err: err.message }, 'redis subscriber error'));
 pool.on('error', (err) => app.log.warn({ err: err.message }, 'postgres pool error'));
 redis.connect().catch(() => {
   // Reported through /readyz; ioredis keeps retrying in the background.
 });
+subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
+  app.log.warn({ err }, 'auth invalidation subscription failed; relying on cache TTL'),
+);
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');
   await app.close();
-  await Promise.allSettled([pool.end(), redis.quit()]);
+  await Promise.allSettled([pool.end(), redis.quit(), subscriber.quit()]);
   process.exit(0);
 }
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
