@@ -127,10 +127,15 @@ describe('usage_events partitioning', () => {
     expect(rows[0].n).toBe(10);
   });
 
-  it('rejects a duplicate request id within the same timestamp', async () => {
+  it('ignores a second insert of the same request id (idempotent writes)', async () => {
     const event = usageEvent({ createdAt: new Date('2031-05-18T00:00:00Z') });
     await insertUsageEvent(db, event);
-    await expect(insertUsageEvent(db, event)).rejects.toThrow();
+    await insertUsageEvent(db, event);
+    const { rows } = await pool.query(
+      `select count(*)::int as n from usage_events where request_id = $1`,
+      [event.requestId],
+    );
+    expect(rows[0].n).toBe(1);
   });
 });
 

@@ -50,10 +50,26 @@ services:
       # Used by local/* models when the local-models profile (Ollama) is running.
       LOCAL_MODELS_BASE_URL: http://ollama:11434/v1
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
+    # Usage events spilled while Redis is unreachable survive container restarts.
+    volumes: [usage-spill:/app/data]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       mock-provider: { condition: service_healthy }
+
+  # Consumes usage events from Redis and writes them to Postgres.
+  usage-worker:
+    image: llm-gateway/gateway:local
+    command: ['node', 'dist/worker.js']
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      disable: true
 
   mock-provider:
     build: { context: ., target: mock-provider }
@@ -84,6 +100,7 @@ services:
       retries: 20
 
 volumes:
+  usage-spill:
   postgres-data:
   lgtm-data:
   ollama-data:

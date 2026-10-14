@@ -9,7 +9,15 @@ import type { ProviderError } from '../providers/errors.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { estimateTokens } from '../providers/openai-compatible.js';
 import { planCandidates } from '../routing/planner.js';
-import { sendStream, type StreamOptions } from './stream.js';
+import { buildUsageEvent, type UsageEventInput } from '../metering/event.js';
+import { noopRecorder, type UsageRecorder } from '../metering/recorder.js';
+import { sendStream, type StreamOptions, type StreamStatus } from './stream.js';
+
+const streamStatus: Record<StreamStatus, UsageEventInput['status']> = {
+  completed: 'success',
+  partial: 'partial',
+  client_cancelled: 'client_cancelled',
+};
 
 export interface CredentialSource {
   resolve(tenantId: string, provider: string): Promise<ResolvedCredential | null>;
@@ -22,6 +30,7 @@ export type ChatRouteDeps = {
   engine?: ExecutionEngine;
   deadline?: DeadlineOptions;
   stream?: StreamOptions;
+  usage?: UsageRecorder;
 };
 
 /** Upstream failures as the client sees them. */
@@ -93,9 +102,11 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
   const engine = deps.engine ?? new ExecutionEngine();
   const deadlineOptions = deps.deadline ?? { defaultMs: 60_000, maxMs: 300_000 };
   const streamOptions = deps.stream ?? { idleTimeoutMs: 30_000, heartbeatMs: 15_000 };
+  const usage = deps.usage ?? noopRecorder;
 
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
+      const startedAt = new Date();
       const deadlineMs = effectiveDeadlineMs(
         request.headers['x-gateway-timeout-ms'],
         deadlineOptions,
@@ -135,6 +146,33 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       if (plan.skipped.length)
         request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
+      // Every request that reaches a provider is metered, whatever its outcome.
+      const meter = (
+        outcome: Pick<UsageEventInput, 'status' | 'model' | 'attempts' | 'usage' | 'ttftMs'>,
+      ) => {
+        try {
+          usage.record(
+            buildUsageEvent({
+              ...outcome,
+              requestId: request.id,
+              tenantId: auth.tenantId,
+              apiKeyId: auth.keyId,
+              requestedModel: body.model,
+              firstCandidateId: plan.candidates[0]!.id,
+              startedAt,
+              finishedAt: new Date(),
+              routeReason: plan.virtual
+                ? `policy:${body.model}`
+                : body.gateway?.fallback
+                  ? 'concrete+fallback'
+                  : 'concrete',
+            }),
+          );
+        } catch (err) {
+          request.log.error({ err }, 'failed to build usage event');
+        }
+      };
+
       try {
         if (body.stream) {
           // Fallback is possible only until the first event; after that the stream is committed.
@@ -144,6 +182,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             deadlineAt,
             client.signal,
           );
+          const ttftMs = Date.now() - startedAt.getTime();
           const outcome = await sendStream({
             request,
             reply,
@@ -168,6 +207,13 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             },
             'stream finished',
           );
+          meter({
+            status: streamStatus[outcome.status],
+            model: stream.served,
+            attempts: stream.attempts,
+            usage: outcome.usage,
+            ttftMs,
+          });
           return reply;
         }
 
@@ -179,6 +225,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         );
         if (attempts.length > 1)
           request.log.info({ attempts }, 'request needed retries or fallback');
+        meter({ status: 'success', model: served, attempts, usage: result.usage, ttftMs: null });
         reply.headers({
           'x-gateway-provider': served.provider,
           'x-gateway-model': served.id,
@@ -189,6 +236,15 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       } catch (err) {
         if (err instanceof ExecutionFailure) {
           request.log.warn({ attempts: err.attempts }, 'all attempts failed');
+          const lastTried = err.failures.at(-1)?.candidate ?? plan.candidates[0]!;
+          // Failed attempts got no upstream response worth billing, so no usage is recorded.
+          meter({
+            status: 'error',
+            model: lastTried,
+            attempts: err.attempts,
+            usage: undefined,
+            ttftMs: null,
+          });
           throw failureToGatewayError(err, deadlineMs);
         }
         throw err;
