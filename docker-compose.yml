@@ -75,6 +75,24 @@ services:
     healthcheck:
       disable: true
 
+  # Usage dashboard. Sign in with GitHub (DASHBOARD_USERS allow-list) or the read-only demo
+  # (set DEMO_TENANT_ID to the id printed by `cli demo:seed`).
+  dashboard:
+    build: { context: ., target: dashboard }
+    image: llm-gateway/dashboard:local
+    environment:
+      GATEWAY_URL: http://gateway:3000
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      NEXTAUTH_URL: http://localhost:${DASHBOARD_PORT:-3010}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      DEMO_TENANT_ID: ${DEMO_TENANT_ID:-}
+      DASHBOARD_USERS: ${DASHBOARD_USERS:-{}}
+      GITHUB_ID: ${GITHUB_ID:-}
+      GITHUB_SECRET: ${GITHUB_SECRET:-}
+    ports: ['127.0.0.1:${DASHBOARD_PORT:-3010}:3002']
+    depends_on:
+      gateway: { condition: service_healthy }
+
   mock-provider:
     build: { context: ., target: mock-provider }
     image: llm-gateway/mock-provider:local

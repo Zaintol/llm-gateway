@@ -3,3 +3,4 @@ dist/
 coverage/
 packages/gateway/drizzle/meta/
 PLAN.md
+.next/
