@@ -75,6 +75,11 @@ const envSchema = z.object({
   USAGE_JOB_BACKOFF_MS: z.coerce.number().int().positive().default(5_000),
   /** Bearer token for GET /metrics; unset leaves it open (fine on a private network). */
   METRICS_TOKEN: z.string().min(16).optional(),
+  /** Open budget reservations are refunded if not settled within this lease (crashed instance). */
+  BUDGET_LEASE_MS: z.coerce.number().int().positive().default(600_000),
+  BUDGET_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  /** How often Redis budget counters are rebuilt from usage_events (the source of truth). */
+  BUDGET_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

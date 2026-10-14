@@ -3,7 +3,7 @@ import type { Redis } from 'ioredis';
 import { publishKeyInvalidation } from '../auth/invalidation.js';
 import { generateApiKey } from '../auth/keys.js';
 import type { Db } from '../db/client.js';
-import { apiKeys, auditLog, tenants } from '../db/schema.js';
+import { apiKeys, auditLog, budgets, tenants } from '../db/schema.js';
 import { GatewayError } from '../errors.js';
 
 export type Actor = { type: 'admin' | 'system'; id: string };
@@ -184,4 +184,44 @@ export async function setRateLimits(
       .where(eq(apiKeys.tenantId, target.tenantId));
     await Promise.all(keys.map((k) => publishKeyInvalidation(redis, k.prefix)));
   }
+}
+
+/** Sets a tenant-wide daily or monthly budget (null removes a limit). Applies within ~30 s. */
+export async function setBudget(
+  db: Db,
+  input: {
+    tenantId: string;
+    period: 'daily' | 'monthly';
+    hardLimitMicros?: bigint | null;
+    softLimitMicros?: bigint | null;
+  },
+  actor: Actor,
+): Promise<void> {
+  const values = {
+    ...(input.hardLimitMicros !== undefined ? { hardLimitMicros: input.hardLimitMicros } : {}),
+    ...(input.softLimitMicros !== undefined ? { softLimitMicros: input.softLimitMicros } : {}),
+  };
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(budgets)
+      .values({ tenantId: input.tenantId, apiKeyId: null, period: input.period, ...values })
+      .onConflictDoUpdate({
+        target: [budgets.tenantId, budgets.apiKeyId, budgets.period],
+        set: values,
+      })
+      .returning({ id: budgets.id });
+    await tx.insert(auditLog).values({
+      actorType: actor.type,
+      actorId: actor.id,
+      tenantId: input.tenantId,
+      action: 'budget.set',
+      targetType: 'budget',
+      targetId: row!.id,
+      metadata: {
+        period: input.period,
+        hardLimitMicros: input.hardLimitMicros?.toString() ?? null,
+        softLimitMicros: input.softLimitMicros?.toString() ?? null,
+      },
+    });
+  });
 }

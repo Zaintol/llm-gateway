@@ -48,6 +48,9 @@ export class ExecutionFailure extends Error {
   }
 }
 
+/** Per-request callbacks. A throw from `beforeCandidate` (e.g. 402) aborts the whole chain. */
+export type ExecutionHooks = { beforeCandidate?: (candidate: Candidate) => Promise<void> };
+
 export type EngineOptions = {
   /** Retries per candidate after the first attempt. */
   maxRetries?: number;
@@ -103,11 +106,13 @@ export class ExecutionEngine {
     candidates: Candidate[],
     deadlineAt: number,
     signal?: AbortSignal,
+    hooks: ExecutionHooks = {},
   ): Promise<ExecutionSuccess> {
     return this.run(
       candidates,
       deadlineAt,
       signal,
+      hooks,
       async (candidate, remainingMs, attemptSignal) => {
         const result = await candidate.adapter.complete(request, {
           upstreamModel: candidate.upstreamModel,
@@ -132,11 +137,13 @@ export class ExecutionEngine {
     candidates: Candidate[],
     deadlineAt: number,
     signal?: AbortSignal,
+    hooks: ExecutionHooks = {},
   ): Promise<StreamSuccess> {
     return this.run(
       candidates,
       deadlineAt,
       signal,
+      hooks,
       async (candidate, remainingMs, attemptSignal) => {
         const controller = new AbortController();
         const onAbort = () => controller.abort(attemptSignal.reason);
@@ -185,6 +192,7 @@ export class ExecutionEngine {
     candidates: Candidate[],
     deadlineAt: number,
     signal: AbortSignal | undefined,
+    hooks: ExecutionHooks,
     attempt: (candidate: Candidate, remainingMs: number, signal: AbortSignal) => Promise<T>,
   ): Promise<{ value: T; served: Candidate; attempts: AttemptRecord[] }> {
     const attempts: AttemptRecord[] = [];
@@ -193,6 +201,7 @@ export class ExecutionEngine {
     const callerSignal = signal ?? new AbortController().signal;
 
     for (const candidate of candidates) {
+      await hooks.beforeCandidate?.(candidate);
       let lastError: ProviderError | undefined;
       let tries = 0;
       for (let retry = 0; retry <= this.maxRetries; retry++) {
