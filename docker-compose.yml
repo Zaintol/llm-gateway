@@ -61,6 +61,21 @@ services:
       redis: { condition: service_healthy }
       mock-provider: { condition: service_healthy }
 
+  # Operator CLI without Node on the host: docker compose run --rm cli <command> (e.g. demo:seed).
+  cli:
+    image: llm-gateway/gateway:local
+    profiles: [tools]
+    entrypoint: ['node', 'dist/cli.js']
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY}
+      GATEWAY_MASTER_KEY_VERSION: ${GATEWAY_MASTER_KEY_VERSION:-1}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
   # Consumes usage events from Redis and writes them to Postgres.
   usage-worker:
     image: llm-gateway/gateway:local

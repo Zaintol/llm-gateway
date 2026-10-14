@@ -22,6 +22,8 @@ jobs:
         with: { node-version-file: .nvmrc, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      # Fails when a request schema or admin route changed without regenerating docs/api.
+      - run: pnpm docs:check
 
   typecheck:
     runs-on: ubuntu-latest
