@@ -9,6 +9,7 @@ import { modelsRoutes } from './catalog/route.js';
 import { chatRoutes } from './chat/route.js';
 import { ExecutionEngine } from './execution/engine.js';
 import { createUsageQueue } from './metering/queue.js';
+import { RedisRateLimiter } from './ratelimit/limiter.js';
 import { QueueUsageRecorder } from './metering/recorder.js';
 import { SpillFile } from './metering/spill.js';
 import { providerFetch } from './providers/fetch.js';
@@ -91,6 +92,7 @@ const app = buildApp({
   logLevel: config.LOG_LEVEL,
   trustProxy: config.TRUST_PROXY,
   bodyLimitBytes: config.REQUEST_BODY_LIMIT_BYTES,
+  ...(config.METRICS_TOKEN ? { metricsToken: config.METRICS_TOKEN } : {}),
   readinessTimeoutMs: config.READINESS_TIMEOUT_MS,
   readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
   auth: { authenticator, failureLimiter },
@@ -112,6 +114,9 @@ const app = buildApp({
         heartbeatMs: config.STREAM_HEARTBEAT_MS,
       },
       usage: usageRecorder,
+      rateLimiter: new RedisRateLimiter(redis, (err) =>
+        app.log.warn({ err }, 'rate limiter unavailable; admitting requests without limits'),
+      ),
       deadline: {
         defaultMs: config.REQUEST_DEADLINE_DEFAULT_MS,
         maxMs: config.REQUEST_DEADLINE_MAX_MS,

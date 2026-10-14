@@ -134,3 +134,54 @@ export async function revokeApiKey(
   }
   await publishKeyInvalidation(redis, input.prefix);
 }
+
+export type LimitUpdate = { rpm?: number | null; tpm?: number | null };
+
+/** Sets tenant-wide or per-key rate limits (null removes a limit). Takes effect within the auth cache TTL. */
+export async function setRateLimits(
+  db: Db,
+  redis: Redis,
+  target: { tenantId: string; keyPrefix?: string },
+  limits: LimitUpdate,
+  actor: Actor,
+): Promise<void> {
+  const values = {
+    ...(limits.rpm !== undefined ? { rpmLimit: limits.rpm } : {}),
+    ...(limits.tpm !== undefined ? { tpmLimit: limits.tpm } : {}),
+  };
+  if (Object.keys(values).length === 0) return;
+  await db.transaction(async (tx) => {
+    let targetId: string;
+    if (target.keyPrefix) {
+      const [row] = await tx
+        .update(apiKeys)
+        .set(values)
+        .where(and(eq(apiKeys.tenantId, target.tenantId), eq(apiKeys.prefix, target.keyPrefix)))
+        .returning({ id: apiKeys.id });
+      if (!row)
+        throw new GatewayError(404, 'not_found', 'api_key_not_found', 'No key with that prefix');
+      targetId = row.id;
+    } else {
+      await tx.update(tenants).set(values).where(eq(tenants.id, target.tenantId));
+      targetId = target.tenantId;
+    }
+    await tx.insert(auditLog).values({
+      actorType: actor.type,
+      actorId: actor.id,
+      tenantId: target.tenantId,
+      action: 'rate_limits.set',
+      targetType: target.keyPrefix ? 'api_key' : 'tenant',
+      targetId,
+      metadata: { ...limits, ...(target.keyPrefix ? { prefix: target.keyPrefix } : {}) },
+    });
+  });
+  // Cached auth entries carry the limits; drop them so the change applies on the next request.
+  if (target.keyPrefix) await publishKeyInvalidation(redis, target.keyPrefix);
+  else {
+    const keys = await db
+      .select({ prefix: apiKeys.prefix })
+      .from(apiKeys)
+      .where(eq(apiKeys.tenantId, target.tenantId));
+    await Promise.all(keys.map((k) => publishKeyInvalidation(redis, k.prefix)));
+  }
+}

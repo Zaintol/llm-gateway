@@ -10,6 +10,8 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import { estimateTokens } from '../providers/openai-compatible.js';
 import { planCandidates } from '../routing/planner.js';
 import { buildUsageEvent, type UsageEventInput } from '../metering/event.js';
+import { noopRateLimiter, type RateLimiter } from '../ratelimit/limiter.js';
+import { estimatePromptTokens } from '../routing/tokens.js';
 import { noopRecorder, type UsageRecorder } from '../metering/recorder.js';
 import { sendStream, type StreamOptions, type StreamStatus } from './stream.js';
 
@@ -31,7 +33,14 @@ export type ChatRouteDeps = {
   deadline?: DeadlineOptions;
   stream?: StreamOptions;
   usage?: UsageRecorder;
+  rateLimiter?: RateLimiter;
 };
+
+/**
+ * Output tokens assumed at admission when the request sets no max_tokens. Corrected to the
+ * actual count after the call, so it only affects how early a TPM limit bites.
+ */
+export const DEFAULT_OUTPUT_TOKEN_ESTIMATE = 1024;
 
 /** Upstream failures as the client sees them. */
 export function toGatewayError(err: ProviderError): GatewayError {
@@ -103,6 +112,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
   const deadlineOptions = deps.deadline ?? { defaultMs: 60_000, maxMs: 300_000 };
   const streamOptions = deps.stream ?? { idleTimeoutMs: 30_000, heartbeatMs: 15_000 };
   const usage = deps.usage ?? noopRecorder;
+  const rateLimiter = deps.rateLimiter ?? noopRateLimiter;
 
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
@@ -146,10 +156,22 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
       if (plan.skipped.length)
         request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
+      const admission = await rateLimiter.admit({
+        keyId: auth.keyId,
+        tenantId: auth.tenantId,
+        limits: auth.limits,
+        estimatedTokens:
+          estimatePromptTokens(body, plan.candidates[0]!.provider) +
+          (body.max_tokens ?? DEFAULT_OUTPUT_TOKEN_ESTIMATE),
+      });
+      reply.headers(admission.headers);
+
       // Every request that reaches a provider is metered, whatever its outcome.
       const meter = (
         outcome: Pick<UsageEventInput, 'status' | 'model' | 'attempts' | 'usage' | 'ttftMs'>,
       ) => {
+        const billed = outcome.usage;
+        void rateLimiter.settle(admission, billed ? billed.inputTokens + billed.outputTokens : 0);
         try {
           usage.record(
             buildUsageEvent({
@@ -192,6 +214,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
               'x-gateway-model': stream.served.id,
               'x-gateway-attempts': String(stream.attempts.length),
               'x-gateway-deadline-ms': String(deadlineMs),
+              ...admission.headers,
             },
             includeUsage: body.stream_options?.include_usage === true,
             promptEstimate: estimateTokens(JSON.stringify(body.messages)),

@@ -22,6 +22,7 @@ describe('Authenticator', () => {
       keyId: record.keyId,
       keyPrefix: record.prefix,
       tenantSettings: { region: 'eu' },
+      limits: record.limits,
     });
   });
 

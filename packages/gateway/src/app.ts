@@ -3,6 +3,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyPluginAsy
 import { errorEnvelope } from '@gw/schema';
 import { guardAdminPlane, requireApiKey, type DataPlaneAuth } from './auth/plugin.js';
 import { GatewayError } from './errors.js';
+import { registry } from './observability/metrics.js';
 import { checkReadiness, type DependencyCheck } from './readiness.js';
 
 /** Fastify's own client errors, renamed into the gateway's vocabulary. */
@@ -21,6 +22,8 @@ export type AppOptions = {
   readinessChecks: Record<string, DependencyCheck>;
   readinessTimeoutMs: number;
   auth: DataPlaneAuth;
+  /** When set, GET /metrics requires `Authorization: Bearer <metricsToken>`. */
+  metricsToken?: string;
   /** Routes mounted under /v1, behind API key authentication. */
   dataPlaneRoutes?: FastifyPluginAsync[];
 };
@@ -53,6 +56,22 @@ export function buildApp(options: AppOptions): FastifyInstance {
     return reply
       .code(report.ready ? 200 : 503)
       .send({ status: report.ready ? 'ok' : 'unavailable', checks: report.checks, failing });
+  });
+
+  // Prometheus scrape endpoint. Lock it down with METRICS_TOKEN when the port is public.
+  app.get('/metrics', async (request, reply) => {
+    if (
+      options.metricsToken &&
+      request.headers.authorization !== `Bearer ${options.metricsToken}`
+    ) {
+      throw new GatewayError(
+        401,
+        'authentication',
+        'metrics_token_required',
+        'Metrics token required',
+      );
+    }
+    return reply.type(registry.contentType).send(await registry.metrics());
   });
 
   app.register(
