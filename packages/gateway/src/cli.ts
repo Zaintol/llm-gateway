@@ -5,10 +5,19 @@
  *   gw key:create <tenant-slug> <key-name> [--expires-in-days <n>]
  *   gw key:list <tenant-slug>
  *   gw key:revoke <tenant-slug> <key-prefix>
+ *   gw credential:set <tenant-slug|--platform> <provider> <label> [--base-url <url>]  (secret on stdin)
+ *   gw credential:list <tenant-slug|--platform>
+ *   gw credentials:reencrypt
  */
 import { userInfo } from 'node:os';
 import { ConfigError, loadConfig } from './config.js';
 import { createDb, createPool } from './db/client.js';
+import {
+  keyProviderFromConfig,
+  listCredentials,
+  reencryptCredentials,
+  setCredential,
+} from './credentials/service.js';
 import { createRedis } from './redis.js';
 import {
   createApiKey,
@@ -23,7 +32,16 @@ const usage = `Usage:
   tenant:create <slug> <name>
   key:create <tenant-slug> <key-name> [--expires-in-days <n>]
   key:list <tenant-slug>
-  key:revoke <tenant-slug> <key-prefix>`;
+  key:revoke <tenant-slug> <key-prefix>
+  credential:set <tenant-slug|--platform> <provider> <label> [--base-url <url>]   (secret on stdin)
+  credential:list <tenant-slug|--platform>
+  credentials:reencrypt`;
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
 
 function fail(message: string): never {
   console.error(message);
@@ -41,6 +59,11 @@ const [command, ...args] = process.argv.slice(2);
 const actor: Actor = { type: 'admin', id: `cli:${userInfo().username}` };
 const pool = createPool(config.DATABASE_URL);
 const db = createDb(pool);
+
+/** `--platform` selects the platform-default scope (null tenant). */
+async function ownerId(arg: string | undefined): Promise<string | null> {
+  return arg === '--platform' ? null : tenantId(arg);
+}
 
 async function tenantId(slug: string | undefined): Promise<string> {
   if (!slug) fail(usage);
@@ -102,6 +125,47 @@ try {
         redis.disconnect();
       }
       console.log(`Revoked key ${prefix}`);
+      break;
+    }
+    case 'credential:set': {
+      const [owner, provider, label, flag, baseUrl] = args;
+      if (!provider || !label) fail(usage);
+      if (process.stdin.isTTY) console.error('Paste the provider secret, then press Ctrl-D:');
+      // Read from stdin so the secret never lands in shell history or the process list.
+      const secret = await readStdin();
+      const result = await setCredential(
+        db,
+        keyProviderFromConfig(config),
+        {
+          tenantId: await ownerId(owner),
+          provider,
+          label,
+          secret,
+          baseUrl: flag === '--base-url' ? (baseUrl ?? null) : null,
+        },
+        actor,
+      );
+      console.log(`Stored ${provider} credential "${label}" ending in ${result.last4}`);
+      break;
+    }
+    case 'credential:list': {
+      const rows = await listCredentials(db, await ownerId(args[0]));
+      console.table(
+        rows.map((c) => ({
+          provider: c.provider,
+          label: c.label,
+          scope: c.scope,
+          secret: `…${c.last4}`,
+          baseUrl: c.baseUrl ?? '-',
+        })),
+      );
+      break;
+    }
+    case 'credentials:reencrypt': {
+      const count = await reencryptCredentials(db, keyProviderFromConfig(config));
+      console.log(
+        `Re-wrapped ${count} credential(s) under master key v${config.GATEWAY_MASTER_KEY_VERSION}`,
+      );
       break;
     }
     default:

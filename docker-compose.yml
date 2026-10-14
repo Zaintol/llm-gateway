@@ -43,6 +43,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY}
+      GATEWAY_MASTER_KEY_VERSION: ${GATEWAY_MASTER_KEY_VERSION:-1}
+      GATEWAY_PREVIOUS_MASTER_KEYS: ${GATEWAY_PREVIOUS_MASTER_KEYS:-}
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     depends_on:
       migrate: { condition: service_completed_successfully }

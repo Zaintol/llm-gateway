@@ -1,0 +1,9 @@
+# Extends the default rules. Only the published dev-only master key in .env.example is allowed;
+# any other secret in that file (or anywhere else) still fails the scan.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dev-only master key documented in .env.example"
+regexTarget = "match"
+regexes = ['''GATEWAY_MASTER_KEY=ZGV2LW9ubHktbWFzdGVyLWtleS1kby1ub3QtdXNlISE=''']

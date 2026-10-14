@@ -79,6 +79,11 @@ export const providerCredentials = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     tenantId: uuid('tenant_id').references(() => tenants.id, { onDelete: 'cascade' }),
     provider: text('provider').notNull(),
+    label: text('label').notNull(),
+    /** Last 4 characters of the secret, the only part ever shown back. */
+    last4: text('last4').notNull(),
+    /** Override for OpenAI-compatible or proxy endpoints; null uses the provider default. */
+    baseUrl: text('base_url'),
     ciphertext: bytea('ciphertext').notNull(),
     iv: bytea('iv').notNull(),
     authTag: bytea('auth_tag').notNull(),
@@ -200,6 +205,7 @@ export const usageEvents = pgTable(
     modelId: text('model_id').notNull(),
     provider: text('provider').notNull(),
     priceId: uuid('price_id'),
+    credentialScope: text('credential_scope', { enum: ['tenant', 'platform'] }),
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),
     cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
