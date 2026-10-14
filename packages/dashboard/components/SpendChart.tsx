@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { formatBucket, formatTick, formatUsd } from '@/lib/format';
 import type { Bucket, Series } from '@/lib/overview';
 
@@ -37,12 +37,14 @@ export function SpendChart({
   const [width, setWidth] = useState(720);
   const [active, setActive] = useState<number | null>(null);
 
-  useEffect(() => {
+  // Measure before the first paint, then follow the container. ResizeObserver alone can deliver
+  // its first callback late (e.g. in a background tab), leaving the chart at the default width.
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const observer = new ResizeObserver(([entry]) =>
-      setWidth(Math.max(280, Math.floor(entry!.contentRect.width))),
-    );
+    const fit = (w: number) => setWidth(Math.max(280, Math.floor(w)));
+    fit(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) => fit(entry!.contentRect.width));
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
