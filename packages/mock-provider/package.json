@@ -18,5 +18,12 @@
   },
   "devDependencies": {
     "tsx": "^4.23.15"
+  },
+  "exports": {
+    ".": {
+      "@gw/source": "./src/app.ts",
+      "types": "./dist/app.d.ts",
+      "default": "./dist/app.js"
+    }
   }
 }

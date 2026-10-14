@@ -46,10 +46,12 @@ services:
       GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY}
       GATEWAY_MASTER_KEY_VERSION: ${GATEWAY_MASTER_KEY_VERSION:-1}
       GATEWAY_PREVIOUS_MASTER_KEYS: ${GATEWAY_PREVIOUS_MASTER_KEYS:-}
+      MOCK_PROVIDER_BASE_URL: http://mock-provider:4000/v1
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
+      mock-provider: { condition: service_healthy }
 
   mock-provider:
     build: { context: ., target: mock-provider }

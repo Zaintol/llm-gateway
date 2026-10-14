@@ -21,10 +21,12 @@
     "cli:dev": "node --conditions=@gw/source --import tsx src/cli.ts"
   },
   "devDependencies": {
+    "@gw/mock-provider": "workspace:*",
     "@testcontainers/postgresql": "^12.2.1",
     "@testcontainers/redis": "^12.2.1",
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.11",
+    "openai": "^7.33.0",
     "testcontainers": "^12.2.1",
     "tsx": "^4.23.15"
   },
