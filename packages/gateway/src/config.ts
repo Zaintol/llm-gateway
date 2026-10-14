@@ -30,6 +30,9 @@ const previousMasterKeys = z
     return keys;
   });
 
+/** Compose passes unset variables as empty strings; treat those as absent. */
+const optionalUrl = z.preprocess((v) => (v === '' ? undefined : v), z.url().optional());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().min(1).default('0.0.0.0'),
@@ -64,9 +67,9 @@ const envSchema = z.object({
   OPENAI_BASE_URL: z.url().default('https://api.openai.com/v1'),
   ANTHROPIC_BASE_URL: z.url().default('https://api.anthropic.com'),
   /** Default OpenAI-compatible endpoint for `local/*` models (Ollama, vLLM). A credential's base_url overrides it. */
-  LOCAL_MODELS_BASE_URL: z.url().optional(),
+  LOCAL_MODELS_BASE_URL: optionalUrl,
   /** When set, registers the `mock` provider (no credential needed). Used by tests and the demo. */
-  MOCK_PROVIDER_BASE_URL: z.url().optional(),
+  MOCK_PROVIDER_BASE_URL: optionalUrl,
   /** Usage events that cannot be queued (Redis down) are appended here and replayed later. */
   USAGE_SPILL_PATH: z.string().min(1).default('./data/usage-spill.ndjson'),
   /** Worker retries per usage event before it lands in the dead-letter queue. */
@@ -80,6 +83,11 @@ const envSchema = z.object({
   BUDGET_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   /** How often Redis budget counters are rebuilt from usage_events (the source of truth). */
   BUDGET_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  /** Platform default for cost-aware routing of virtual models; tenants can override it. */
+  FF_COST_AWARE_ROUTING: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

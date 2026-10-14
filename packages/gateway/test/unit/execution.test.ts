@@ -93,6 +93,8 @@ function make(
     auth: fakes.auth,
     dataPlaneRoutes: [
       chatRoutes({
+        // Static chains: these tests exercise fallback order, not cost-aware routing.
+        flags: { ff_cost_aware_routing: false },
         providers: new ProviderRegistry(adapters, catalog),
         catalog,
         credentials: new StaticCredentials(),
@@ -329,7 +331,7 @@ describe('metering of executed requests (GW-7.1)', () => {
       inputTokens: 3,
       outputTokens: 1,
       usageSource: 'provider',
-      routeReason: 'policy:gw/resilient',
+      routeReason: 'static chain of gw/resilient',
     });
     // 3 input * 0.05 USD/Mtok + 1 output * 0.20 USD/Mtok = 0.35 micro-USD, rounded to 0
     expect(event!.costMicros).toBe('0');

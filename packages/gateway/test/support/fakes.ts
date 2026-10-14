@@ -79,6 +79,7 @@ export class StaticCredentials implements CredentialSource {
 /** Adapter double that records calls and returns a canned result or throws. */
 export class FakeAdapter implements ProviderAdapter {
   calls: Array<{ request: ChatCompletionRequest; call: ProviderCall }> = [];
+  isConfigured?: (credential: unknown) => boolean;
   constructor(
     readonly provider: string,
     private readonly behaviour: (
@@ -149,6 +150,7 @@ export function catalogModel(overrides: Partial<CatalogModel> = {}): CatalogMode
     qualityTier: 1,
     latencyTier: 'fast' as const,
     enabled: true,
+    routable: true,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     price: PRICE_1,
     prices: [PRICE_1],

@@ -54,6 +54,8 @@ export interface ProviderAdapter {
   readonly provider: string;
   /** False for endpoints that need no API key (local models, the mock provider). */
   readonly requiresCredential: boolean;
+  /** Whether a call could be made at all, e.g. an endpoint URL is known. Defaults to true. */
+  isConfigured?(credential: ResolvedCredential | null): boolean;
   complete(request: ChatCompletionRequest, call: ProviderCall): Promise<ProviderResult>;
   /** Streams the completion. The upstream request starts on the first `next()`. */
   stream(request: ChatCompletionRequest, call: ProviderCall): AsyncIterable<StreamEvent>;

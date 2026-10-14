@@ -44,6 +44,8 @@ const modelSchema = z.object({
   quality_tier: z.number().int().min(1).max(3),
   latency_tier: z.enum(['fast', 'standard', 'slow']),
   enabled: z.boolean().default(true),
+  /** False keeps the model out of cost-aware routing (e.g. failure-mode demo models). */
+  routable: z.boolean().default(true),
   price: priceSchema,
 });
 

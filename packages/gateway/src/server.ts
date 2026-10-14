@@ -122,6 +122,7 @@ const app = buildApp({
       },
       usage: usageRecorder,
       budgets: budgetService,
+      flags: { ff_cost_aware_routing: config.FF_COST_AWARE_ROUTING },
       rateLimiter: new RedisRateLimiter(redis, (err) =>
         app.log.warn({ err }, 'rate limiter unavailable; admitting requests without limits'),
       ),

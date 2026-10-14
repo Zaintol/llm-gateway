@@ -1,5 +1,6 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from '@gw/schema';
 import { z } from 'zod';
+import type { ResolvedCredential } from '../credentials/service.js';
 import { ProviderError } from './errors.js';
 import { openStream, postJson, resolveBaseUrl, streamReadError } from './http.js';
 import { parseSse } from './sse.js';
@@ -108,6 +109,10 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     this.requiresCredential = options.requiresCredential ?? true;
     this.defaultBaseUrl = options.defaultBaseUrl;
     this.fetch = options.fetch ?? globalThis.fetch;
+  }
+
+  isConfigured(credential: ResolvedCredential | null): boolean {
+    return Boolean(credential?.baseUrl ?? this.defaultBaseUrl);
   }
 
   /** Canonical request to OpenAI wire format. Gateway-only fields never leave the gateway. */

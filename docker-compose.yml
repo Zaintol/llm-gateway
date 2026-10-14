@@ -47,8 +47,9 @@ services:
       GATEWAY_MASTER_KEY_VERSION: ${GATEWAY_MASTER_KEY_VERSION:-1}
       GATEWAY_PREVIOUS_MASTER_KEYS: ${GATEWAY_PREVIOUS_MASTER_KEYS:-}
       MOCK_PROVIDER_BASE_URL: http://mock-provider:4000/v1
-      # Used by local/* models when the local-models profile (Ollama) is running.
-      LOCAL_MODELS_BASE_URL: http://ollama:11434/v1
+      # local/* models are only offered when an endpoint is set. With the Ollama profile:
+      #   LOCAL_MODELS_BASE_URL=http://ollama:11434/v1 docker compose --profile local-models up
+      LOCAL_MODELS_BASE_URL: ${LOCAL_MODELS_BASE_URL:-}
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     # Usage events spilled while Redis is unreachable survive container restarts.
     volumes: [usage-spill:/app/data]

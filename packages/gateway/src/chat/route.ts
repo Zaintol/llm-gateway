@@ -13,6 +13,7 @@ import { buildUsageEvent, type UsageEventInput } from '../metering/event.js';
 import { noopRateLimiter, type RateLimiter } from '../ratelimit/limiter.js';
 import { worstCaseCostMicros, type BudgetService, type Reservation } from '../budget/service.js';
 import { estimatePromptTokens } from '../routing/tokens.js';
+import { flagEnabled, type FlagDefaults } from '../flags.js';
 import { noopRecorder, type UsageRecorder } from '../metering/recorder.js';
 import { sendStream, type StreamOptions, type StreamStatus } from './stream.js';
 
@@ -36,6 +37,7 @@ export type ChatRouteDeps = {
   usage?: UsageRecorder;
   rateLimiter?: RateLimiter;
   budgets?: BudgetService;
+  flags?: FlagDefaults;
 };
 
 /**
@@ -116,6 +118,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
   const usage = deps.usage ?? noopRecorder;
   const rateLimiter = deps.rateLimiter ?? noopRateLimiter;
   const budgets = deps.budgets;
+  const flags = deps.flags ?? { ff_cost_aware_routing: true };
 
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
@@ -155,7 +158,10 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         credentials: deps.credentials,
         tenantId: auth.tenantId,
         tenantSettings: auth.tenantSettings,
+        costAware: flagEnabled('ff_cost_aware_routing', flags, auth.tenantSettings),
+        at: startedAt,
       });
+      reply.header('x-gateway-route-reason', plan.routeReason);
       if (plan.skipped.length)
         request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
@@ -189,11 +195,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
             firstCandidateId: plan.candidates[0]!.id,
             startedAt,
             finishedAt: new Date(),
-            routeReason: plan.virtual
-              ? `policy:${body.model}`
-              : body.gateway?.fallback
-                ? 'concrete+fallback'
-                : 'concrete',
+            routeReason: plan.routeReason,
           });
           void budgets?.settle(reservation, BigInt(event.costMicros));
           usage.record(event);
@@ -237,6 +239,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
               'x-gateway-model': stream.served.id,
               'x-gateway-attempts': String(stream.attempts.length),
               'x-gateway-deadline-ms': String(deadlineMs),
+              'x-gateway-route-reason': plan.routeReason,
               ...admission.headers,
             },
             includeUsage: body.stream_options?.include_usage === true,

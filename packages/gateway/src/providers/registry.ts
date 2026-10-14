@@ -1,4 +1,5 @@
 import type { CatalogModel, ModelCatalog } from '../catalog/catalog.js';
+import type { ResolvedCredential } from '../credentials/service.js';
 import { GatewayError } from '../errors.js';
 import type { ProviderAdapter } from './types.js';
 
@@ -30,6 +31,15 @@ export class ProviderRegistry {
 
   get providers(): string[] {
     return [...this.adapters.keys()];
+  }
+
+  requiresCredential(provider: string): boolean {
+    return this.adapters.get(provider)?.requiresCredential ?? true;
+  }
+
+  isConfigured(provider: string, credential: ResolvedCredential | null): boolean {
+    const adapter = this.adapters.get(provider);
+    return adapter ? (adapter.isConfigured?.(credential) ?? true) : false;
   }
 
   resolve(modelId: string): ResolvedModel {

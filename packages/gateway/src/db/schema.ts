@@ -119,6 +119,8 @@ export const models = pgTable(
     qualityTier: smallint('quality_tier').notNull(),
     latencyTier: text('latency_tier', { enum: ['fast', 'standard', 'slow'] }).notNull(),
     enabled: boolean('enabled').notNull().default(true),
+    /** False keeps a model out of cost-aware routing; it can still be requested by name. */
+    routable: boolean('routable').notNull().default(true),
     createdAt: createdAt(),
   },
   (t) => [

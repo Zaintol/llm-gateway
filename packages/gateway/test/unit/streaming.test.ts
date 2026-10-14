@@ -71,6 +71,8 @@ beforeAll(async () => {
     auth: fakes.auth,
     dataPlaneRoutes: [
       chatRoutes({
+        // Static chains: these tests exercise fallback order, not cost-aware routing.
+        flags: { ff_cost_aware_routing: false },
         providers: new ProviderRegistry(
           [
             new OpenAiCompatibleAdapter({
