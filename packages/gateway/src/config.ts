@@ -45,6 +45,9 @@ const envSchema = z.object({
   REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
   PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   OPENAI_BASE_URL: z.url().default('https://api.openai.com/v1'),
+  ANTHROPIC_BASE_URL: z.url().default('https://api.anthropic.com'),
+  /** Default OpenAI-compatible endpoint for `local/*` models (Ollama, vLLM). A credential's base_url overrides it. */
+  LOCAL_MODELS_BASE_URL: z.url().optional(),
   /** When set, registers the `mock` provider (no credential needed). Used by tests and the demo. */
   MOCK_PROVIDER_BASE_URL: z.url().optional(),
   TRUST_PROXY: z

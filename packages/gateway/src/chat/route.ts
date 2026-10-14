@@ -100,6 +100,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
           'x-gateway-provider': model.provider,
           'x-gateway-model': model.id,
           'x-gateway-attempts': '1',
+          ...(result.emulated?.length ? { 'x-gateway-emulated': result.emulated.join(',') } : {}),
         });
         return result.response;
       } catch (err) {

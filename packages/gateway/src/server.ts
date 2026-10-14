@@ -6,6 +6,7 @@ import { subscribeToKeyInvalidations } from './auth/invalidation.js';
 import { PgKeyStore } from './auth/key-store.js';
 import { chatRoutes } from './chat/route.js';
 import { CredentialResolver, keyProviderFromConfig } from './credentials/service.js';
+import { AnthropicAdapter } from './providers/anthropic.js';
 import { OpenAiCompatibleAdapter } from './providers/openai-compatible.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { createDb, createPool } from './db/client.js';
@@ -40,6 +41,13 @@ const failureLimiter = new RedisFailureLimiter(redis, {
 
 const providers = new ProviderRegistry([
   new OpenAiCompatibleAdapter({ provider: 'openai', defaultBaseUrl: config.OPENAI_BASE_URL }),
+  new AnthropicAdapter({ defaultBaseUrl: config.ANTHROPIC_BASE_URL }),
+  // Local models need no key; the endpoint comes from a credential row or LOCAL_MODELS_BASE_URL.
+  new OpenAiCompatibleAdapter({
+    provider: 'local',
+    ...(config.LOCAL_MODELS_BASE_URL ? { defaultBaseUrl: config.LOCAL_MODELS_BASE_URL } : {}),
+    requiresCredential: false,
+  }),
   ...(config.MOCK_PROVIDER_BASE_URL
     ? [
         new OpenAiCompatibleAdapter({
