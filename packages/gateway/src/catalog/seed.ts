@@ -49,6 +49,7 @@ export async function seedCatalog(
         qualityTier: model.quality_tier,
         latencyTier: model.latency_tier,
         enabled: model.enabled,
+        routable: model.routable,
       };
       await tx
         .insert(models)

@@ -21,6 +21,8 @@ export type CatalogModel = {
   qualityTier: number;
   latencyTier: 'fast' | 'standard' | 'slow';
   enabled: boolean;
+  /** Eligible for cost-aware routing of virtual models. */
+  routable: boolean;
   createdAt: Date;
   /** The price in effect when the catalog was loaded; null only if none is in effect. */
   price: ModelPrice | null;
@@ -128,6 +130,7 @@ export class PgCatalog implements ModelCatalog {
           qualityTier: model.qualityTier,
           latencyTier: model.latencyTier,
           enabled: model.enabled,
+          routable: model.routable,
           createdAt: model.createdAt,
           prices,
           price: priceAt({ prices }, now),

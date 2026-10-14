@@ -5,12 +5,19 @@ import type { ResolvedCredential } from '../credentials/service.js';
 import { GatewayError } from '../errors.js';
 import type { ProviderRegistry, ResolvedModel } from '../providers/registry.js';
 import { requirementsOf, unmetRequirements } from './requirements.js';
+import { routeByCost } from './router.js';
 
 export const MAX_CHAIN_LENGTH = 4;
 
 export type Candidate = ResolvedModel & { credential: ResolvedCredential | null };
 export type SkippedCandidate = { id: string; reason: string };
-export type Plan = { candidates: Candidate[]; skipped: SkippedCandidate[]; virtual: boolean };
+export type Plan = {
+  candidates: Candidate[];
+  skipped: SkippedCandidate[];
+  virtual: boolean;
+  /** Why this chain was chosen; returned in x-gateway-route-reason and stored on the usage event. */
+  routeReason: string;
+};
 
 /**
  * Turns the requested model into an ordered candidate chain.
@@ -26,11 +33,15 @@ export async function planCandidates(input: {
   credentials: CredentialSource;
   tenantId: string;
   tenantSettings: Record<string, unknown>;
+  /** ff_cost_aware_routing: rank virtual models by cost instead of using the static chain. */
+  costAware?: boolean;
+  at?: Date;
 }): Promise<Plan> {
   const { request, registry, catalog } = input;
   const policy = catalog?.getPolicy(request.model);
   let chain: string[];
   let virtual = false;
+  let routeReason = 'concrete';
 
   if (policy) {
     if (!policy.enabled) {
@@ -41,12 +52,30 @@ export async function planCandidates(input: {
         `Model "${request.model}" is disabled`,
       );
     }
-    chain = policy.fallbackChain;
     virtual = true;
+    if (input.costAware && catalog) {
+      const decision = await routeByCost({
+        request,
+        policy,
+        catalog,
+        registry,
+        credentials: input.credentials,
+        tenantId: input.tenantId,
+        at: input.at ?? new Date(),
+      });
+      chain = decision.chain;
+      routeReason = decision.reason;
+    } else {
+      chain = policy.fallbackChain;
+      routeReason = `static chain of ${policy.id}`;
+    }
   } else {
     registry.resolve(request.model); // unknown or disabled concrete models fail fast with 400
     chain = [request.model];
-    if (request.gateway?.fallback) chain.push(...defaultChain(input.tenantSettings, catalog));
+    if (request.gateway?.fallback) {
+      chain.push(...defaultChain(input.tenantSettings, catalog));
+      routeReason = 'concrete with tenant fallback chain';
+    }
   }
   chain = [...new Set(chain)].slice(0, MAX_CHAIN_LENGTH);
 
@@ -71,6 +100,10 @@ export async function planCandidates(input: {
       skipped.push({ id, reason: `no ${resolved.provider} credential` });
       continue;
     }
+    if (resolved.adapter.isConfigured && !resolved.adapter.isConfigured(credential)) {
+      skipped.push({ id, reason: `no ${resolved.provider} endpoint configured` });
+      continue;
+    }
     candidates.push({ ...resolved, credential });
   }
 
@@ -85,7 +118,7 @@ export async function planCandidates(input: {
       `No model can serve this request: ${detail}`,
     );
   }
-  return { candidates, skipped, virtual };
+  return { candidates, skipped, virtual, routeReason };
 }
 
 /** The tenant's `fallback_chain` setting, else the `auto` policy chain. */

@@ -120,6 +120,8 @@ function make(options: {
     auth: fakes.auth,
     dataPlaneRoutes: [
       chatRoutes({
+        // Static chains: these tests exercise fallback order, not cost-aware routing.
+        flags: { ff_cost_aware_routing: false },
         providers: new ProviderRegistry(options.adapters, catalog),
         catalog,
         credentials: new StaticCredentials(),

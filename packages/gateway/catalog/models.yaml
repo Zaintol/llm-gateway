@@ -124,6 +124,7 @@ models:
   - id: mock/server-error
     upstream_model: server-error
     description: Always fails with 500; use to demo retries and fallback.
+    routable: false # failure-mode demo model: request it by name, never auto-routed
     context_window: 32000
     max_output_tokens: 4096
     capabilities: { tools: true, vision: false, json_mode: true, streaming: true }
@@ -138,6 +139,7 @@ models:
   - id: mock/rate-limit
     upstream_model: rate-limit
     description: Always returns 429; use to demo retry-after handling.
+    routable: false # failure-mode demo model: request it by name, never auto-routed
     context_window: 32000
     max_output_tokens: 4096
     capabilities: { tools: true, vision: false, json_mode: true, streaming: true }
@@ -152,6 +154,7 @@ models:
   - id: mock/slow-3000
     upstream_model: slow-3000
     description: Answers after 3 seconds; use to demo timeouts.
+    routable: false # failure-mode demo model: request it by name, never auto-routed
     context_window: 32000
     max_output_tokens: 4096
     capabilities: { tools: false, vision: false, json_mode: true, streaming: true }

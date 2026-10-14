@@ -83,7 +83,7 @@ export function buildUsageEvent(input: UsageEventInput): UsageEvent {
     fallbackUsed: input.model.id !== input.firstCandidateId,
     latencyMs: Math.max(0, input.finishedAt.getTime() - input.startedAt.getTime()),
     ttftMs: input.ttftMs,
-    routeReason: input.routeReason,
+    routeReason: input.routeReason?.slice(0, 500) ?? null,
     createdAt: input.startedAt.toISOString(),
   };
 }

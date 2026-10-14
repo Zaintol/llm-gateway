@@ -1,0 +1,1 @@
+ALTER TABLE "models" ADD COLUMN "routable" boolean DEFAULT true NOT NULL;

@@ -51,7 +51,7 @@ export const formatUsd = (micros: bigint) =>
  */
 export function worstCaseCostMicros(
   request: ChatCompletionRequest,
-  candidate: Candidate,
+  candidate: Pick<Candidate, 'model' | 'provider'>,
   at: Date,
 ): bigint {
   const model = candidate.model;
