@@ -1,0 +1,7 @@
+{
+  "name": "@gw/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Usage dashboard (Next.js). Scaffolded in GW-9.2; intentionally empty in Phase 0."
+}

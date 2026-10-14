@@ -1,0 +1,82 @@
+name: llm-gateway
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ['127.0.0.1:${POSTGRES_PORT:-5442}:5432']
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ['127.0.0.1:${REDIS_PORT:-6389}:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-off: applies migrations, then exits. The gateway never migrates on boot.
+  migrate:
+    build: { context: ., target: gateway }
+    image: llm-gateway/gateway:local
+    command: ['node', 'dist/db/migrate.js']
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: 'no'
+
+  gateway:
+    image: llm-gateway/gateway:local
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+    ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  mock-provider:
+    build: { context: ., target: mock-provider }
+    image: llm-gateway/mock-provider:local
+    environment:
+      PORT: 4000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports: ['127.0.0.1:${MOCK_PROVIDER_PORT:-4000}:4000']
+
+  # Grafana, Tempo, Prometheus, Loki and an OTel Collector in one container (OTLP on 4317/4318).
+  lgtm:
+    image: grafana/otel-lgtm:0.11.0
+    ports:
+      - '127.0.0.1:${GRAFANA_PORT:-3001}:3000'
+      - '127.0.0.1:4317:4317'
+      - '127.0.0.1:4318:4318'
+    volumes: [lgtm-data:/data]
+
+  ollama:
+    image: ollama/ollama:0.12.3
+    profiles: [local-models]
+    ports: ['127.0.0.1:${OLLAMA_PORT:-11434}:11434']
+    volumes: [ollama-data:/root/.ollama]
+    healthcheck:
+      test: ['CMD', 'ollama', 'list']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres-data:
+  lgtm-data:
+  ollama-data:
