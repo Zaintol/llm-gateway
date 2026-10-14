@@ -135,11 +135,13 @@ describe('POST /v1/chat/completions', () => {
     expect(adapter.calls[0]!.call).toMatchObject({ upstreamModel: 'gpt-4o-mini', credential });
   });
 
-  it('rejects stream: true until streaming ships', async () => {
+  it('streams when stream: true is set', async () => {
     const { send } = make();
     const res = await send({ ...valid, stream: true });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('stream_not_supported');
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    expect(res.headers['x-request-id']).toMatch(/^req_/);
+    expect(res.body.trim().endsWith('data: [DONE]')).toBe(true);
   });
 
   it.each([

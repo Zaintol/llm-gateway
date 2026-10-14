@@ -1,8 +1,53 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from '@gw/schema';
 import { z } from 'zod';
 import { ProviderError } from './errors.js';
-import { postJson, resolveBaseUrl } from './http.js';
-import type { ProviderAdapter, ProviderCall, ProviderResult } from './types.js';
+import { openStream, postJson, resolveBaseUrl, streamReadError } from './http.js';
+import { parseSse } from './sse.js';
+import type {
+  ProviderAdapter,
+  ProviderCall,
+  ProviderResult,
+  ProviderUsage,
+  StreamDelta,
+  StreamEvent,
+} from './types.js';
+
+const streamChunkSchema = z.object({
+  choices: z
+    .array(
+      z.object({
+        index: z.number(),
+        delta: z
+          .object({
+            role: z.string().optional(),
+            content: z.string().nullish(),
+            tool_calls: z
+              .array(
+                z.object({
+                  index: z.number(),
+                  id: z.string().optional(),
+                  type: z.literal('function').optional(),
+                  function: z
+                    .object({ name: z.string().optional(), arguments: z.string().optional() })
+                    .optional(),
+                }),
+              )
+              .optional(),
+          })
+          .optional(),
+        finish_reason: z.enum(['stop', 'length', 'tool_calls', 'content_filter']).nullish(),
+      }),
+    )
+    .default([]),
+  usage: z
+    .object({
+      prompt_tokens: z.number(),
+      completion_tokens: z.number(),
+      prompt_tokens_details: z.object({ cached_tokens: z.number().optional() }).nullish(),
+    })
+    .nullish(),
+  error: z.object({ message: z.string() }).loose().optional(),
+});
 
 const upstreamResponseSchema = z.object({
   id: z.string(),
@@ -121,6 +166,90 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     return { response, usage };
   }
 
+  async *stream(request: ChatCompletionRequest, call: ProviderCall): AsyncGenerator<StreamEvent> {
+    const baseUrl = resolveBaseUrl(this.provider, call, this.defaultBaseUrl);
+    const body = await openStream({
+      provider: this.provider,
+      url: `${baseUrl}/chat/completions`,
+      headers: call.credential ? { authorization: `Bearer ${call.credential.secret}` } : {},
+      // Usage is always requested upstream so the gateway can meter; the client opts in separately.
+      body: {
+        ...this.buildRequest(request, call.upstreamModel),
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      signal: call.signal,
+      fetch: this.fetch,
+    });
+
+    let usage: ProviderUsage | undefined;
+    let output = '';
+    try {
+      for await (const event of parseSse(body)) {
+        if (event.data === '[DONE]') break;
+        let json: unknown;
+        try {
+          json = JSON.parse(event.data);
+        } catch {
+          throw new ProviderError(
+            'provider_error',
+            this.provider,
+            'Malformed stream chunk from provider',
+          );
+        }
+        const chunk = streamChunkSchema.safeParse(json);
+        if (!chunk.success) {
+          throw new ProviderError(
+            'provider_error',
+            this.provider,
+            'Malformed stream chunk from provider',
+          );
+        }
+        if (chunk.data.error) {
+          throw new ProviderError('provider_error', this.provider, chunk.data.error.message);
+        }
+        if (chunk.data.usage) {
+          usage = {
+            inputTokens: chunk.data.usage.prompt_tokens,
+            outputTokens: chunk.data.usage.completion_tokens,
+            cachedInputTokens: chunk.data.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            source: 'provider',
+          };
+        }
+        for (const choice of chunk.data.choices) {
+          if (choice.index !== 0) continue;
+          const delta: StreamDelta = {};
+          if (choice.delta?.role === 'assistant') delta.role = 'assistant';
+          if (choice.delta?.content) {
+            delta.content = choice.delta.content;
+            output += choice.delta.content;
+          }
+          if (choice.delta?.tool_calls) {
+            delta.tool_calls = choice.delta.tool_calls.map((t) => ({
+              index: t.index,
+              ...(t.id ? { id: t.id } : {}),
+              ...(t.type ? { type: t.type } : {}),
+              ...(t.function ? { function: stripUndefined(t.function) } : {}),
+            }));
+            output += JSON.stringify(choice.delta.tool_calls);
+          }
+          yield { type: 'delta', delta, finishReason: choice.finish_reason ?? null };
+        }
+      }
+    } catch (err) {
+      throw streamReadError(this.provider, err, call.signal);
+    }
+    yield {
+      type: 'usage',
+      usage: usage ?? {
+        inputTokens: estimateTokens(JSON.stringify(request.messages)),
+        outputTokens: estimateTokens(output),
+        cachedInputTokens: 0,
+        source: 'estimated',
+      },
+    };
+  }
+
   async complete(request: ChatCompletionRequest, call: ProviderCall): Promise<ProviderResult> {
     const baseUrl = resolveBaseUrl(this.provider, call, this.defaultBaseUrl);
     const body = await postJson({
@@ -133,4 +262,12 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     });
     return this.parseResponse(body, request);
   }
+}
+
+function stripUndefined<T extends Record<string, unknown>>(
+  value: T,
+): { [K in keyof T]: Exclude<T[K], undefined> } {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as {
+    [K in keyof T]: Exclude<T[K], undefined>;
+  };
 }

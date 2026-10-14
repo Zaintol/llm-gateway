@@ -7,7 +7,9 @@ import { effectiveDeadlineMs, type DeadlineOptions } from '../execution/deadline
 import { ExecutionEngine, ExecutionFailure, type CandidateFailure } from '../execution/engine.js';
 import type { ProviderError } from '../providers/errors.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import { estimateTokens } from '../providers/openai-compatible.js';
 import { planCandidates } from '../routing/planner.js';
+import { sendStream, type StreamOptions } from './stream.js';
 
 export interface CredentialSource {
   resolve(tenantId: string, provider: string): Promise<ResolvedCredential | null>;
@@ -19,6 +21,7 @@ export type ChatRouteDeps = {
   credentials: CredentialSource;
   engine?: ExecutionEngine;
   deadline?: DeadlineOptions;
+  stream?: StreamOptions;
 };
 
 /** Upstream failures as the client sees them. */
@@ -89,6 +92,7 @@ export function failureToGatewayError(failure: ExecutionFailure, deadlineMs: num
 export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
   const engine = deps.engine ?? new ExecutionEngine();
   const deadlineOptions = deps.deadline ?? { defaultMs: 60_000, maxMs: 300_000 };
+  const streamOptions = deps.stream ?? { idleTimeoutMs: 30_000, heartbeatMs: 15_000 };
 
   return async (scope) => {
     scope.post('/chat/completions', async (request, reply) => {
@@ -113,15 +117,11 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         const ignored = Object.keys(request.body).filter((k) => !knownRequestFields.has(k));
         if (ignored.length) request.log.debug({ ignored }, 'ignoring unknown request fields');
       }
-      if (body.stream) {
-        // Streaming lands in GW-2.6.
-        throw new GatewayError(
-          400,
-          'invalid_request',
-          'stream_not_supported',
-          'stream: true is not supported yet',
-        );
-      }
+      // Fires when the client goes away before the response has been fully written.
+      const client = new AbortController();
+      reply.raw.on('close', () => {
+        if (!reply.raw.writableFinished) client.abort(new Error('client disconnected'));
+      });
 
       const auth = request.auth!;
       const plan = await planCandidates({
@@ -136,10 +136,46 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
         request.log.info({ skipped: plan.skipped }, 'skipped ineligible candidates');
 
       try {
+        if (body.stream) {
+          // Fallback is possible only until the first event; after that the stream is committed.
+          const stream = await engine.executeStream(
+            body,
+            plan.candidates,
+            deadlineAt,
+            client.signal,
+          );
+          const outcome = await sendStream({
+            request,
+            reply,
+            stream,
+            headers: {
+              'x-gateway-provider': stream.served.provider,
+              'x-gateway-model': stream.served.id,
+              'x-gateway-attempts': String(stream.attempts.length),
+              'x-gateway-deadline-ms': String(deadlineMs),
+            },
+            includeUsage: body.stream_options?.include_usage === true,
+            promptEstimate: estimateTokens(JSON.stringify(body.messages)),
+            clientSignal: client.signal,
+            options: streamOptions,
+          });
+          request.log.info(
+            {
+              status: outcome.status,
+              chunks: outcome.chunks,
+              usage: outcome.usage,
+              attempts: stream.attempts,
+            },
+            'stream finished',
+          );
+          return reply;
+        }
+
         const { result, served, attempts } = await engine.execute(
           body,
           plan.candidates,
           deadlineAt,
+          client.signal,
         );
         if (attempts.length > 1)
           request.log.info({ attempts }, 'request needed retries or fallback');

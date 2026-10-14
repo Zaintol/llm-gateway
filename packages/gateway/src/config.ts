@@ -53,6 +53,11 @@ const envSchema = z.object({
    * is ready, so this must cover generation time; streaming adds a first-token timeout (GW-2.6).
    */
   PROVIDER_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  /** Streaming: wait this long for the first event before trying the next attempt or candidate. */
+  PROVIDER_FIRST_TOKEN_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+  /** Streaming: end the stream with an error if the provider sends nothing for this long. */
+  STREAM_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  STREAM_HEARTBEAT_MS: z.coerce.number().int().positive().default(15_000),
   RETRY_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
   RETRY_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(200),
   RETRY_BACKOFF_CAP_MS: z.coerce.number().int().positive().default(2_000),

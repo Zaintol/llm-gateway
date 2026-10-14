@@ -1,6 +1,6 @@
 import type { ChatCompletionRequest } from '@gw/schema';
 import { ProviderError, type ProviderErrorKind } from '../providers/errors.js';
-import type { ProviderResult } from '../providers/types.js';
+import type { ProviderResult, StreamEvent } from '../providers/types.js';
 import type { Candidate } from '../routing/planner.js';
 
 export type AttemptRecord = {
@@ -17,6 +17,19 @@ export type ExecutionSuccess = {
   result: ProviderResult;
   served: Candidate;
   attempts: AttemptRecord[];
+};
+
+/**
+ * A stream that has produced its first event. From here on the response is committed to this
+ * candidate: later failures cannot fall back, because bytes have reached the client.
+ */
+export type StreamSuccess = {
+  served: Candidate;
+  attempts: AttemptRecord[];
+  first: StreamEvent;
+  rest: AsyncIterator<StreamEvent>;
+  /** Aborts the upstream request (client disconnect, idle timeout). */
+  abort: (reason?: unknown) => void;
 };
 
 export type CandidateFailure = { candidate: Candidate; error: ProviderError; attempts: number };
@@ -42,6 +55,8 @@ export type EngineOptions = {
   backoffCapMs?: number;
   /** Upper bound for one non-streaming attempt; the remaining deadline may cut it shorter. */
   attemptTimeoutMs?: number;
+  /** Streaming: how long to wait for the first event before abandoning the attempt. */
+  firstTokenTimeoutMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
@@ -62,6 +77,7 @@ export class ExecutionEngine {
   private readonly backoffBaseMs: number;
   private readonly backoffCapMs: number;
   private readonly attemptTimeoutMs: number;
+  private readonly firstTokenTimeoutMs: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
@@ -71,6 +87,7 @@ export class ExecutionEngine {
     this.backoffBaseMs = options.backoffBaseMs ?? 200;
     this.backoffCapMs = options.backoffCapMs ?? 2000;
     this.attemptTimeoutMs = options.attemptTimeoutMs ?? 60_000;
+    this.firstTokenTimeoutMs = options.firstTokenTimeoutMs ?? 20_000;
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? defaultSleep;
     this.random = options.random ?? Math.random;
@@ -81,36 +98,111 @@ export class ExecutionEngine {
     return Math.floor(this.random() * Math.min(this.backoffCapMs, this.backoffBaseMs * 2 ** retry));
   }
 
-  async execute(
+  execute(
     request: ChatCompletionRequest,
     candidates: Candidate[],
     deadlineAt: number,
     signal?: AbortSignal,
   ): Promise<ExecutionSuccess> {
+    return this.run(
+      candidates,
+      deadlineAt,
+      signal,
+      async (candidate, remainingMs, attemptSignal) => {
+        const result = await candidate.adapter.complete(request, {
+          upstreamModel: candidate.upstreamModel,
+          credential: candidate.credential,
+          signal: AbortSignal.any([
+            AbortSignal.timeout(Math.min(this.attemptTimeoutMs, remainingMs)),
+            attemptSignal,
+          ]),
+          ...(candidate.model ? { maxOutputTokens: candidate.model.maxOutputTokens } : {}),
+        });
+        return { result };
+      },
+    ).then(({ value, served, attempts }) => ({ result: value.result, served, attempts }));
+  }
+
+  /**
+   * Opens a stream on the first candidate that produces an event within the first-token timeout.
+   * Retries and fallback apply only until that first event.
+   */
+  executeStream(
+    request: ChatCompletionRequest,
+    candidates: Candidate[],
+    deadlineAt: number,
+    signal?: AbortSignal,
+  ): Promise<StreamSuccess> {
+    return this.run(
+      candidates,
+      deadlineAt,
+      signal,
+      async (candidate, remainingMs, attemptSignal) => {
+        const controller = new AbortController();
+        const onAbort = () => controller.abort(attemptSignal.reason);
+        attemptSignal.addEventListener('abort', onAbort, { once: true });
+        const timer = setTimeout(
+          () => controller.abort(),
+          Math.min(this.firstTokenTimeoutMs, remainingMs),
+        );
+        const iterator = candidate.adapter
+          .stream(request, {
+            upstreamModel: candidate.upstreamModel,
+            credential: candidate.credential,
+            signal: controller.signal,
+            ...(candidate.model ? { maxOutputTokens: candidate.model.maxOutputTokens } : {}),
+          })
+          [Symbol.asyncIterator]();
+        try {
+          const first = await iterator.next();
+          if (first.done) {
+            throw new ProviderError(
+              'provider_error',
+              candidate.provider,
+              `${candidate.provider} returned an empty stream`,
+            );
+          }
+          return {
+            first: first.value,
+            rest: iterator,
+            abort: (reason?: unknown) => controller.abort(reason),
+          };
+        } catch (err) {
+          controller.abort();
+          throw err;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    ).then(({ value, served, attempts }) => ({ ...value, served, attempts }));
+  }
+
+  /**
+   * The retry and fallback loop shared by both modes. `attempt` receives the remaining deadline
+   * and a signal that fires if the caller gives up (client disconnect).
+   */
+  private async run<T>(
+    candidates: Candidate[],
+    deadlineAt: number,
+    signal: AbortSignal | undefined,
+    attempt: (candidate: Candidate, remainingMs: number, signal: AbortSignal) => Promise<T>,
+  ): Promise<{ value: T; served: Candidate; attempts: AttemptRecord[] }> {
     const attempts: AttemptRecord[] = [];
     const failures: CandidateFailure[] = [];
     const remaining = () => deadlineAt - this.now();
+    const callerSignal = signal ?? new AbortController().signal;
 
     for (const candidate of candidates) {
       let lastError: ProviderError | undefined;
       let tries = 0;
       for (let retry = 0; retry <= this.maxRetries; retry++) {
-        if (remaining() <= 0 || signal?.aborted) break;
-        const attemptSignal = AbortSignal.any([
-          AbortSignal.timeout(Math.min(this.attemptTimeoutMs, remaining())),
-          ...(signal ? [signal] : []),
-        ]);
+        if (remaining() <= 0 || callerSignal.aborted) break;
         const started = this.now();
         tries++;
         try {
-          const result = await candidate.adapter.complete(request, {
-            upstreamModel: candidate.upstreamModel,
-            credential: candidate.credential,
-            signal: attemptSignal,
-            ...(candidate.model ? { maxOutputTokens: candidate.model.maxOutputTokens } : {}),
-          });
+          const value = await attempt(candidate, remaining(), callerSignal);
           attempts.push(record(candidate, retry, 'success', this.now() - started));
-          return { result, served: candidate, attempts };
+          return { value, served: candidate, attempts };
         } catch (err) {
           if (!(err instanceof ProviderError)) throw err;
           lastError = err;
@@ -140,7 +232,7 @@ export class ExecutionEngine {
         }
       }
       if (lastError) failures.push({ candidate, error: lastError, attempts: tries });
-      if (remaining() <= 0 || signal?.aborted) break;
+      if (remaining() <= 0 || callerSignal.aborted) break;
     }
     throw new ExecutionFailure(failures, attempts, remaining() <= 0);
   }
