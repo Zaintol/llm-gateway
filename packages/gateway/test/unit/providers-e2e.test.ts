@@ -43,7 +43,6 @@ beforeAll(async () => {
         credentials: new StaticCredentials({
           anthropic: { secret: 'sk-ant-test', baseUrl: upstreamUrl, scope: 'platform' },
         }),
-        providerTimeoutMs: 5000,
       }),
     ],
   });

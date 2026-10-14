@@ -41,7 +41,7 @@ function make(modelCatalog: ModelCatalog = catalog) {
     auth: fakes.auth,
     dataPlaneRoutes: [
       modelsRoutes({ catalog: modelCatalog, providers }),
-      chatRoutes({ providers, credentials: new StaticCredentials(), providerTimeoutMs: 1000 }),
+      chatRoutes({ providers, catalog: modelCatalog, credentials: new StaticCredentials() }),
     ],
   });
   const headers = { authorization: `Bearer ${key}` };

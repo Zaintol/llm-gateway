@@ -43,7 +43,19 @@ const envSchema = z.object({
   GATEWAY_PREVIOUS_MASTER_KEYS: previousMasterKeys,
   /** Largest accepted request body; larger requests get 413 before any provider is called. */
   REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
-  PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  /** Overall request deadline when the client sends no x-gateway-timeout-ms, and its cap. */
+  REQUEST_DEADLINE_DEFAULT_MS: z.coerce.number().int().positive().default(60_000),
+  REQUEST_DEADLINE_MAX_MS: z.coerce.number().int().positive().default(300_000),
+  /** TCP/TLS connect timeout to providers. */
+  PROVIDER_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
+  /**
+   * Upper bound for one non-streaming attempt. Providers send nothing until the whole completion
+   * is ready, so this must cover generation time; streaming adds a first-token timeout (GW-2.6).
+   */
+  PROVIDER_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  RETRY_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+  RETRY_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(200),
+  RETRY_BACKOFF_CAP_MS: z.coerce.number().int().positive().default(2_000),
   OPENAI_BASE_URL: z.url().default('https://api.openai.com/v1'),
   ANTHROPIC_BASE_URL: z.url().default('https://api.anthropic.com'),
   /** Default OpenAI-compatible endpoint for `local/*` models (Ollama, vLLM). A credential's base_url overrides it. */

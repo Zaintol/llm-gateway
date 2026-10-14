@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import { chatRoutes, type CredentialSource } from '../../src/chat/route.js';
+import { ExecutionEngine } from '../../src/execution/engine.js';
 import { ProviderError } from '../../src/providers/errors.js';
 import { ProviderRegistry } from '../../src/providers/registry.js';
 import { FakeAdapter, StaticCredentials, cannedResult, fakeAuth } from '../support/fakes.js';
@@ -25,7 +26,7 @@ function make(
       chatRoutes({
         providers: new ProviderRegistry([adapter]),
         credentials: options.credentials ?? new StaticCredentials(),
-        providerTimeoutMs: 1000,
+        engine: new ExecutionEngine({ sleep: async () => {} }),
       }),
     ],
   });
