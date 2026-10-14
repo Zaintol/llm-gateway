@@ -103,12 +103,14 @@ describe('request and token rate limits (GW-5.1)', () => {
   });
 
   it('returns the four x-ratelimit headers with remaining values that decrease', async () => {
-    const { send } = make({ key: { rpm: 20, tpm: 100_000 } });
+    // A low TPM limit refills slowly (1,000/min), so the few tokens each request really uses
+    // still show as a decrease after the admission estimate is corrected to actual usage.
+    const { send } = make({ key: { rpm: 20, tpm: 1_000 } });
     const first = await send();
     const second = await send();
     for (const res of [first, second]) {
       expect(res.headers['x-ratelimit-limit-requests']).toBe('20');
-      expect(res.headers['x-ratelimit-limit-tokens']).toBe('100000');
+      expect(res.headers['x-ratelimit-limit-tokens']).toBe('1000');
     }
     expect(Number(second.headers['x-ratelimit-remaining-requests'])).toBeLessThan(
       Number(first.headers['x-ratelimit-remaining-requests']),
