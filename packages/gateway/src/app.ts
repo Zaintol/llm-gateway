@@ -5,10 +5,19 @@ import { guardAdminPlane, requireApiKey, type DataPlaneAuth } from './auth/plugi
 import { GatewayError } from './errors.js';
 import { checkReadiness, type DependencyCheck } from './readiness.js';
 
+/** Fastify's own client errors, renamed into the gateway's vocabulary. */
+const fastifyErrorCodes: Record<string, string> = {
+  FST_ERR_CTP_BODY_TOO_LARGE: 'request_too_large',
+  FST_ERR_CTP_INVALID_MEDIA_TYPE: 'unsupported_media_type',
+  FST_ERR_CTP_EMPTY_JSON_BODY: 'invalid_json',
+  FST_ERR_CTP_INVALID_JSON_BODY: 'invalid_json',
+};
+
 export type AppOptions = {
   logLevel?: string;
   /** Trust X-Forwarded-For from the platform proxy (needed for per-IP limits behind Fly). */
   trustProxy?: boolean;
+  bodyLimitBytes?: number;
   readinessChecks: Record<string, DependencyCheck>;
   readinessTimeoutMs: number;
   auth: DataPlaneAuth;
@@ -20,6 +29,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const app = Fastify({
     logger: { level: options.logLevel ?? 'info' },
     trustProxy: options.trustProxy ?? false,
+    bodyLimit: options.bodyLimitBytes ?? 1_048_576,
     requestIdHeader: 'x-request-id',
     genReqId: () => `req_${randomUUID()}`,
   });
@@ -86,9 +96,8 @@ export function buildApp(options: AppOptions): FastifyInstance {
         .code(500)
         .send(errorEnvelope('internal', 'internal_error', 'Internal server error'));
     }
-    return reply
-      .code(status)
-      .send(errorEnvelope('invalid_request', error.code ?? 'bad_request', error.message));
+    const code = (error.code && fastifyErrorCodes[error.code]) ?? error.code ?? 'bad_request';
+    return reply.code(status).send(errorEnvelope('invalid_request', code, error.message));
   });
 
   return app;

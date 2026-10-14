@@ -1,7 +1,8 @@
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import { eq } from 'drizzle-orm';
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import { buildApp as buildMockProvider } from '@gw/mock-provider';
+import type { FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -10,6 +11,10 @@ import { Authenticator } from '../../src/auth/authenticator.js';
 import { RedisFailureLimiter } from '../../src/auth/failure-limiter.js';
 import { subscribeToKeyInvalidations } from '../../src/auth/invalidation.js';
 import { PgKeyStore } from '../../src/auth/key-store.js';
+import { chatRoutes } from '../../src/chat/route.js';
+import { OpenAiCompatibleAdapter } from '../../src/providers/openai-compatible.js';
+import { ProviderRegistry } from '../../src/providers/registry.js';
+import { StaticCredentials } from '../support/fakes.js';
 import { parseApiKey } from '../../src/auth/keys.js';
 import { createDb, createPool, type Db } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
@@ -24,9 +29,6 @@ import {
 } from '../../src/tenancy/service.js';
 
 const actor: Actor = { type: 'admin', id: 'admin@example.com' };
-const chatStub: FastifyPluginAsync = async (scope) => {
-  scope.post('/chat/completions', async (request) => ({ tenantId: request.auth?.tenantId }));
-};
 
 let postgres: StartedPostgreSqlContainer;
 let redisContainer: StartedRedisContainer;
@@ -35,6 +37,7 @@ let db: Db;
 let redis: Redis;
 let subscriber: Redis;
 let app: FastifyInstance;
+let upstream: FastifyInstance;
 let tenantId: string;
 
 beforeAll(async () => {
@@ -49,6 +52,8 @@ beforeAll(async () => {
   subscriber = createSubscriber(redisContainer.getConnectionUrl());
   await Promise.all([redis.connect(), subscriber.connect()]);
 
+  upstream = buildMockProvider({ logLevel: 'silent' });
+  const upstreamUrl = await upstream.listen({ host: '127.0.0.1', port: 0 });
   const authenticator = new Authenticator(new PgKeyStore(db));
   await subscribeToKeyInvalidations(subscriber, authenticator);
   app = buildApp({
@@ -56,13 +61,26 @@ beforeAll(async () => {
     readinessChecks: {},
     readinessTimeoutMs: 1000,
     auth: { authenticator, failureLimiter: new RedisFailureLimiter(redis) },
-    dataPlaneRoutes: [chatStub],
+    dataPlaneRoutes: [
+      chatRoutes({
+        providers: new ProviderRegistry([
+          new OpenAiCompatibleAdapter({
+            provider: 'mock',
+            defaultBaseUrl: `${upstreamUrl}/v1`,
+            requiresCredential: false,
+          }),
+        ]),
+        credentials: new StaticCredentials(),
+        providerTimeoutMs: 5000,
+      }),
+    ],
   });
   tenantId = (await createTenant(db, { slug: 'acme', name: 'Acme' }, actor)).id;
 });
 
 afterAll(async () => {
   await app?.close();
+  await upstream?.close();
   redis?.disconnect();
   subscriber?.disconnect();
   await pool?.end();
@@ -75,6 +93,7 @@ const chat = (key: string, ip = '10.1.0.1') =>
     url: '/v1/chat/completions',
     remoteAddress: ip,
     headers: { authorization: `Bearer ${key}` },
+    payload: { model: 'mock/echo', messages: [{ role: 'user', content: 'hi' }] },
   });
 
 describe('api key lifecycle', () => {
@@ -94,10 +113,10 @@ describe('api key lifecycle', () => {
     const { key } = await createApiKey(db, { tenantId, name: 'web' }, actor);
     const res = await chat(key);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ tenantId });
+    expect(res.json().choices[0].message.content).toBe('Mock reply to: hi');
   });
 
-  it('rejects a revoked key within 2 seconds, even while cached', async () => {
+  it('rejects a revoked key on POST /v1/chat/completions within 2 seconds, even while cached', async () => {
     const { key, prefix } = await createApiKey(db, { tenantId, name: 'to-revoke' }, actor);
     expect((await chat(key)).statusCode).toBe(200); // warms the auth cache
 

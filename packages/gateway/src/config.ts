@@ -41,6 +41,12 @@ const envSchema = z.object({
   GATEWAY_MASTER_KEY: masterKey,
   GATEWAY_MASTER_KEY_VERSION: z.coerce.number().int().positive().default(1),
   GATEWAY_PREVIOUS_MASTER_KEYS: previousMasterKeys,
+  /** Largest accepted request body; larger requests get 413 before any provider is called. */
+  REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
+  PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  OPENAI_BASE_URL: z.url().default('https://api.openai.com/v1'),
+  /** When set, registers the `mock` provider (no credential needed). Used by tests and the demo. */
+  MOCK_PROVIDER_BASE_URL: z.url().optional(),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

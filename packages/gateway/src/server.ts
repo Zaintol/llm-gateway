@@ -4,6 +4,10 @@ import { Authenticator } from './auth/authenticator.js';
 import { RedisFailureLimiter } from './auth/failure-limiter.js';
 import { subscribeToKeyInvalidations } from './auth/invalidation.js';
 import { PgKeyStore } from './auth/key-store.js';
+import { chatRoutes } from './chat/route.js';
+import { CredentialResolver, keyProviderFromConfig } from './credentials/service.js';
+import { OpenAiCompatibleAdapter } from './providers/openai-compatible.js';
+import { ProviderRegistry } from './providers/registry.js';
 import { createDb, createPool } from './db/client.js';
 import { createRedis, createSubscriber } from './redis.js';
 import { postgresCheck, redisCheck } from './readiness.js';
@@ -34,12 +38,30 @@ const failureLimiter = new RedisFailureLimiter(redis, {
   onError: (err) => app.log.warn({ err }, 'auth failure limiter unavailable; failing open'),
 });
 
+const providers = new ProviderRegistry([
+  new OpenAiCompatibleAdapter({ provider: 'openai', defaultBaseUrl: config.OPENAI_BASE_URL }),
+  ...(config.MOCK_PROVIDER_BASE_URL
+    ? [
+        new OpenAiCompatibleAdapter({
+          provider: 'mock',
+          defaultBaseUrl: config.MOCK_PROVIDER_BASE_URL,
+          requiresCredential: false,
+        }),
+      ]
+    : []),
+]);
+const credentials = new CredentialResolver(db, keyProviderFromConfig(config));
+
 const app = buildApp({
   logLevel: config.LOG_LEVEL,
   trustProxy: config.TRUST_PROXY,
+  bodyLimitBytes: config.REQUEST_BODY_LIMIT_BYTES,
   readinessTimeoutMs: config.READINESS_TIMEOUT_MS,
   readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
   auth: { authenticator, failureLimiter },
+  dataPlaneRoutes: [
+    chatRoutes({ providers, credentials, providerTimeoutMs: config.PROVIDER_TIMEOUT_MS }),
+  ],
 });
 
 redis.on('error', (err) => app.log.warn({ err: err.message }, 'redis connection error'));
