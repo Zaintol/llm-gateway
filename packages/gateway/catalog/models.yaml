@@ -1,0 +1,179 @@
+# Model catalog: the single source of truth for models, capabilities and prices.
+# Load into Postgres with `pnpm --filter @gw/gateway seed:catalog` (compose runs it after migrations).
+#
+# Prices are USD per million tokens and are append-only in the database: changing a price here
+# inserts a new model_prices row and closes the previous one, so historical costs never change.
+#
+# !! Prices for real providers were entered from memory and are UNVERIFIED. Check each
+# !! source_url and update price.effective_from before relying on any cost figure.
+# Mock model prices are fictional, chosen to make cost-aware routing visible in the demo.
+
+models:
+  # --- OpenAI -------------------------------------------------------------------------------
+  - id: openai/gpt-4o-mini
+    upstream_model: gpt-4o-mini
+    context_window: 128000
+    max_output_tokens: 16384
+    capabilities: { tools: true, vision: true, json_mode: true, streaming: true }
+    quality_tier: 2
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0.15
+      output_per_mtok_usd: 0.60
+      cached_input_per_mtok_usd: 0.075
+      source_url: https://openai.com/api/pricing/
+      effective_from: 2026-10-14
+
+  - id: openai/gpt-4.1-nano
+    upstream_model: gpt-4.1-nano
+    context_window: 1047576
+    max_output_tokens: 32768
+    capabilities: { tools: true, vision: true, json_mode: true, streaming: true }
+    quality_tier: 1
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0.10
+      output_per_mtok_usd: 0.40
+      cached_input_per_mtok_usd: 0.025
+      source_url: https://openai.com/api/pricing/
+      effective_from: 2026-10-14
+
+  # --- Anthropic ----------------------------------------------------------------------------
+  - id: anthropic/claude-haiku-4-5
+    upstream_model: claude-haiku-4-5
+    context_window: 200000
+    max_output_tokens: 8192
+    capabilities: { tools: true, vision: true, json_mode: false, streaming: true }
+    quality_tier: 2
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 1.00
+      output_per_mtok_usd: 5.00
+      cached_input_per_mtok_usd: 0.10
+      source_url: https://www.anthropic.com/pricing#api
+      effective_from: 2026-10-14
+
+  - id: anthropic/claude-sonnet-4-5
+    upstream_model: claude-sonnet-4-5
+    context_window: 200000
+    max_output_tokens: 8192
+    capabilities: { tools: true, vision: true, json_mode: false, streaming: true }
+    quality_tier: 3
+    latency_tier: standard
+    price:
+      input_per_mtok_usd: 3.00
+      output_per_mtok_usd: 15.00
+      cached_input_per_mtok_usd: 0.30
+      source_url: https://www.anthropic.com/pricing#api
+      effective_from: 2026-10-14
+
+  # --- Local (Ollama / vLLM): free, tokens still recorded -----------------------------------
+  - id: local/llama3.2
+    upstream_model: llama3.2
+    context_window: 128000
+    max_output_tokens: 4096
+    capabilities: { tools: true, vision: false, json_mode: true, streaming: true }
+    quality_tier: 1
+    latency_tier: standard
+    price:
+      input_per_mtok_usd: 0
+      output_per_mtok_usd: 0
+      source_url: https://ollama.com/library/llama3.2
+      effective_from: 2026-10-14
+
+  - id: local/smollm:135m
+    upstream_model: smollm:135m
+    context_window: 2048
+    max_output_tokens: 1024
+    capabilities: { tools: false, vision: false, json_mode: false, streaming: true }
+    quality_tier: 1
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0
+      output_per_mtok_usd: 0
+      source_url: https://ollama.com/library/smollm
+      effective_from: 2026-10-14
+
+  # --- Mock provider (demo and tests; fictional prices) -------------------------------------
+  - id: mock/fast
+    upstream_model: fast
+    context_window: 32000
+    max_output_tokens: 4096
+    capabilities: { tools: false, vision: false, json_mode: true, streaming: true }
+    quality_tier: 1
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0.05
+      output_per_mtok_usd: 0.20
+      source_url: https://github.com/Zaintol/llm-gateway/tree/main/packages/mock-provider
+      effective_from: 2026-10-14
+
+  - id: mock/smart
+    upstream_model: smart
+    context_window: 128000
+    max_output_tokens: 8192
+    capabilities: { tools: true, vision: true, json_mode: true, streaming: true }
+    quality_tier: 3
+    latency_tier: standard
+    price:
+      input_per_mtok_usd: 2.00
+      output_per_mtok_usd: 8.00
+      source_url: https://github.com/Zaintol/llm-gateway/tree/main/packages/mock-provider
+      effective_from: 2026-10-14
+
+  - id: mock/server-error
+    upstream_model: server-error
+    description: Always fails with 500; use to demo retries and fallback.
+    context_window: 32000
+    max_output_tokens: 4096
+    capabilities: { tools: true, vision: false, json_mode: true, streaming: true }
+    quality_tier: 2
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0.01
+      output_per_mtok_usd: 0.02
+      source_url: https://github.com/Zaintol/llm-gateway/tree/main/packages/mock-provider
+      effective_from: 2026-10-14
+
+  - id: mock/rate-limit
+    upstream_model: rate-limit
+    description: Always returns 429; use to demo retry-after handling.
+    context_window: 32000
+    max_output_tokens: 4096
+    capabilities: { tools: true, vision: false, json_mode: true, streaming: true }
+    quality_tier: 2
+    latency_tier: fast
+    price:
+      input_per_mtok_usd: 0.01
+      output_per_mtok_usd: 0.02
+      source_url: https://github.com/Zaintol/llm-gateway/tree/main/packages/mock-provider
+      effective_from: 2026-10-14
+
+  - id: mock/slow-3000
+    upstream_model: slow-3000
+    description: Answers after 3 seconds; use to demo timeouts.
+    context_window: 32000
+    max_output_tokens: 4096
+    capabilities: { tools: false, vision: false, json_mode: true, streaming: true }
+    quality_tier: 1
+    latency_tier: slow
+    price:
+      input_per_mtok_usd: 0.01
+      output_per_mtok_usd: 0.02
+      source_url: https://github.com/Zaintol/llm-gateway/tree/main/packages/mock-provider
+      effective_from: 2026-10-14
+
+# Virtual models. Static chains are used until the cost-aware router (GW-6.3) is enabled.
+routing_policies:
+  - id: auto
+    description: Cheapest model that meets the request's requirements.
+    requirements: {}
+    fallback_chain: [mock/fast, mock/smart]
+  - id: gw/cheap-fast
+    description: Lowest-cost fast models.
+    requirements: { latency_tier: fast }
+    fallback_chain: [mock/fast, local/llama3.2]
+  - id: gw/best-quality
+    description: Highest quality tier available.
+    requirements: { min_quality_tier: 3 }
+    fallback_chain: [anthropic/claude-sonnet-4-5, mock/smart]

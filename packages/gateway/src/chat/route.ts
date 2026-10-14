@@ -95,6 +95,7 @@ export function chatRoutes(deps: ChatRouteDeps): FastifyPluginAsync {
           upstreamModel: model.upstreamModel,
           credential,
           signal: AbortSignal.timeout(deps.providerTimeoutMs),
+          ...(model.model ? { maxOutputTokens: model.model.maxOutputTokens } : {}),
         });
         reply.headers({
           'x-gateway-provider': model.provider,

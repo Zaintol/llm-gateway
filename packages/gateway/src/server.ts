@@ -4,6 +4,8 @@ import { Authenticator } from './auth/authenticator.js';
 import { RedisFailureLimiter } from './auth/failure-limiter.js';
 import { subscribeToKeyInvalidations } from './auth/invalidation.js';
 import { PgKeyStore } from './auth/key-store.js';
+import { PgCatalog } from './catalog/catalog.js';
+import { modelsRoutes } from './catalog/route.js';
 import { chatRoutes } from './chat/route.js';
 import { CredentialResolver, keyProviderFromConfig } from './credentials/service.js';
 import { AnthropicAdapter } from './providers/anthropic.js';
@@ -39,25 +41,31 @@ const failureLimiter = new RedisFailureLimiter(redis, {
   onError: (err) => app.log.warn({ err }, 'auth failure limiter unavailable; failing open'),
 });
 
-const providers = new ProviderRegistry([
-  new OpenAiCompatibleAdapter({ provider: 'openai', defaultBaseUrl: config.OPENAI_BASE_URL }),
-  new AnthropicAdapter({ defaultBaseUrl: config.ANTHROPIC_BASE_URL }),
-  // Local models need no key; the endpoint comes from a credential row or LOCAL_MODELS_BASE_URL.
-  new OpenAiCompatibleAdapter({
-    provider: 'local',
-    ...(config.LOCAL_MODELS_BASE_URL ? { defaultBaseUrl: config.LOCAL_MODELS_BASE_URL } : {}),
-    requiresCredential: false,
-  }),
-  ...(config.MOCK_PROVIDER_BASE_URL
-    ? [
-        new OpenAiCompatibleAdapter({
-          provider: 'mock',
-          defaultBaseUrl: config.MOCK_PROVIDER_BASE_URL,
-          requiresCredential: false,
-        }),
-      ]
-    : []),
-]);
+const catalog = new PgCatalog(db, {
+  onError: (err) => app.log.warn({ err }, 'model catalog refresh failed'),
+});
+const providers = new ProviderRegistry(
+  [
+    new OpenAiCompatibleAdapter({ provider: 'openai', defaultBaseUrl: config.OPENAI_BASE_URL }),
+    new AnthropicAdapter({ defaultBaseUrl: config.ANTHROPIC_BASE_URL }),
+    // Local models need no key; the endpoint comes from a credential row or LOCAL_MODELS_BASE_URL.
+    new OpenAiCompatibleAdapter({
+      provider: 'local',
+      ...(config.LOCAL_MODELS_BASE_URL ? { defaultBaseUrl: config.LOCAL_MODELS_BASE_URL } : {}),
+      requiresCredential: false,
+    }),
+    ...(config.MOCK_PROVIDER_BASE_URL
+      ? [
+          new OpenAiCompatibleAdapter({
+            provider: 'mock',
+            defaultBaseUrl: config.MOCK_PROVIDER_BASE_URL,
+            requiresCredential: false,
+          }),
+        ]
+      : []),
+  ],
+  catalog,
+);
 const credentials = new CredentialResolver(db, keyProviderFromConfig(config));
 
 const app = buildApp({
@@ -68,6 +76,7 @@ const app = buildApp({
   readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
   auth: { authenticator, failureLimiter },
   dataPlaneRoutes: [
+    modelsRoutes({ catalog, providers }),
     chatRoutes({ providers, credentials, providerTimeoutMs: config.PROVIDER_TIMEOUT_MS }),
   ],
 });
@@ -78,12 +87,14 @@ pool.on('error', (err) => app.log.warn({ err: err.message }, 'postgres pool erro
 redis.connect().catch(() => {
   // Reported through /readyz; ioredis keeps retrying in the background.
 });
+catalog.start();
 subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
   app.log.warn({ err }, 'auth invalidation subscription failed; relying on cache TTL'),
 );
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');
+  catalog.stop();
   await app.close();
   await Promise.allSettled([pool.end(), redis.quit(), subscriber.quit()]);
   process.exit(0);
