@@ -51,6 +51,7 @@ services:
       #   LOCAL_MODELS_BASE_URL=http://ollama:11434/v1 docker compose --profile local-models up
       LOCAL_MODELS_BASE_URL: ${LOCAL_MODELS_BASE_URL:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-}
       OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1}
     ports: ['127.0.0.1:${GATEWAY_PORT:-3000}:3000']
     # Usage events spilled while Redis is unreachable survive container restarts.

@@ -31,6 +31,10 @@ export class TtlCache<V> {
     this.entries.delete(key);
   }
 
+  clear(): void {
+    this.entries.clear();
+  }
+
   get size(): number {
     return this.entries.size;
   }

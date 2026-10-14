@@ -5,6 +5,9 @@ import { buildApp } from './app.js';
 import { Authenticator } from './auth/authenticator.js';
 import { RedisFailureLimiter } from './auth/failure-limiter.js';
 import { subscribeToKeyInvalidations } from './auth/invalidation.js';
+import { AdminAuthenticator } from './admin/auth.js';
+import { subscribeToInvalidations } from './admin/invalidation.js';
+import { adminRoutes } from './admin/routes.js';
 import { PgKeyStore } from './auth/key-store.js';
 import { PgCatalog } from './catalog/catalog.js';
 import { modelsRoutes } from './catalog/route.js';
@@ -90,7 +93,15 @@ const providers = new ProviderRegistry(
   ],
   catalog,
 );
-const credentials = new CredentialResolver(db, keyProviderFromConfig(config));
+const keyProvider = keyProviderFromConfig(config);
+const credentials = new CredentialResolver(db, keyProvider);
+const adminDeps = {
+  db,
+  redis,
+  keys: keyProvider,
+  catalog,
+  authenticator: new AdminAuthenticator(db, config.ADMIN_JWT_SECRET),
+};
 
 const usageQueue = createUsageQueue(config.REDIS_URL, {
   attempts: config.USAGE_JOB_ATTEMPTS,
@@ -102,7 +113,8 @@ const usageRecorder = new QueueUsageRecorder(usageQueue, new SpillFile(config.US
 });
 
 const budgetLedger = new BudgetLedger(redis, config.BUDGET_LEASE_MS);
-const budgetService = new BudgetService(budgetLedger, new PgBudgetSource(db), (err) =>
+const budgetSource = new PgBudgetSource(db);
+const budgetService = new BudgetService(budgetLedger, budgetSource, (err) =>
   app.log.warn({ err }, 'budget ledger unavailable'),
 );
 
@@ -114,6 +126,7 @@ const app = buildApp({
   readinessTimeoutMs: config.READINESS_TIMEOUT_MS,
   readinessChecks: { postgres: postgresCheck(pool), redis: redisCheck(redis) },
   auth: { authenticator, failureLimiter },
+  admin: { deps: adminDeps, routes: adminRoutes(adminDeps), version: '0.1.0' },
   dataPlaneRoutes: [
     modelsRoutes({ catalog, providers }),
     chatRoutes({
@@ -201,6 +214,16 @@ const reconcile = async () => {
 setTimeout(() => void reconcile(), 5_000).unref();
 const reconcileTimer = setInterval(() => void reconcile(), config.BUDGET_RECONCILE_INTERVAL_MS);
 reconcileTimer.unref();
+subscribeToInvalidations(subscriber, {
+  budgets: (tenantId) => budgetSource.invalidate(tenantId),
+  credentials: (scope) => {
+    if (scope === '*') credentials.invalidateAll();
+    else {
+      const [tenantId, provider] = scope.split(':');
+      credentials.invalidate(tenantId!, provider!);
+    }
+  },
+}).catch((err: unknown) => app.log.warn({ err }, 'admin invalidation subscription failed'));
 subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
   app.log.warn({ err }, 'auth invalidation subscription failed; relying on cache TTL'),
 );

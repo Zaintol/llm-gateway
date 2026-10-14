@@ -6,7 +6,16 @@ import type { Db } from '../db/client.js';
 import { apiKeys, auditLog, budgets, tenants } from '../db/schema.js';
 import { GatewayError } from '../errors.js';
 
-export type Actor = { type: 'admin' | 'system'; id: string };
+export type AdminRole = 'platform_admin' | 'tenant_admin' | 'finance_viewer';
+
+/** Who made a change. `role` and `route` are recorded when it came through the admin API. */
+export type Actor = { type: 'admin' | 'system'; id: string; role?: AdminRole; route?: string };
+
+/** Actor details every audit row carries in its metadata. */
+export const auditContext = (actor: Actor) => ({
+  ...(actor.role ? { role: actor.role } : {}),
+  ...(actor.route ? { route: actor.route } : {}),
+});
 
 export async function createTenant(db: Db, input: { slug: string; name: string }, actor: Actor) {
   return db.transaction(async (tx) => {
@@ -18,7 +27,10 @@ export async function createTenant(db: Db, input: { slug: string; name: string }
       action: 'tenant.create',
       targetType: 'tenant',
       targetId: tenant!.id,
-      metadata: { slug: input.slug },
+      metadata: {
+        ...auditContext(actor),
+        slug: input.slug,
+      },
     });
     return tenant!;
   });
@@ -64,7 +76,11 @@ export async function createApiKey(
       action: 'api_key.create',
       targetType: 'api_key',
       targetId: row!.id,
-      metadata: { prefix: generated.prefix, name: input.name },
+      metadata: {
+        ...auditContext(actor),
+        prefix: generated.prefix,
+        name: input.name,
+      },
     });
     return {
       id: row!.id,
@@ -125,7 +141,10 @@ export async function revokeApiKey(
       action: 'api_key.revoke',
       targetType: 'api_key',
       targetId: row.id,
-      metadata: { prefix: input.prefix },
+      metadata: {
+        ...auditContext(actor),
+        prefix: input.prefix,
+      },
     });
     return true;
   });
@@ -172,7 +191,11 @@ export async function setRateLimits(
       action: 'rate_limits.set',
       targetType: target.keyPrefix ? 'api_key' : 'tenant',
       targetId,
-      metadata: { ...limits, ...(target.keyPrefix ? { prefix: target.keyPrefix } : {}) },
+      metadata: {
+        ...auditContext(actor),
+        ...limits,
+        ...(target.keyPrefix ? { prefix: target.keyPrefix } : {}),
+      },
     });
   });
   // Cached auth entries carry the limits; drop them so the change applies on the next request.
@@ -218,6 +241,7 @@ export async function setBudget(
       targetType: 'budget',
       targetId: row!.id,
       metadata: {
+        ...auditContext(actor),
         period: input.period,
         hardLimitMicros: input.hardLimitMicros?.toString() ?? null,
         softLimitMicros: input.softLimitMicros?.toString() ?? null,
