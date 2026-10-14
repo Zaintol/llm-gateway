@@ -12,16 +12,17 @@ function isMissingPartitionError(err: unknown): boolean {
 }
 
 /**
- * Inserts a usage event. If the event falls in a month that has no partition yet, the partition
- * is created on demand and the insert is retried once. The common path costs a single round trip.
+ * Inserts a usage event idempotently: a second insert for the same request_id and created_at is
+ * ignored. If the event falls in a month that has no partition yet, the partition is created on
+ * demand and the insert is retried once. The common path costs a single round trip.
  */
 export async function insertUsageEvent(db: Db, event: NewUsageEvent): Promise<void> {
   try {
-    await db.insert(usageEvents).values(event);
+    await db.insert(usageEvents).values(event).onConflictDoNothing();
   } catch (err) {
     if (!isMissingPartitionError(err)) throw err;
     const createdAt = event.createdAt ?? new Date();
     await db.execute(sql`select ensure_usage_events_partition(${createdAt.toISOString()})`);
-    await db.insert(usageEvents).values(event);
+    await db.insert(usageEvents).values(event).onConflictDoNothing();
   }
 }

@@ -8,6 +8,9 @@ import { PgCatalog } from './catalog/catalog.js';
 import { modelsRoutes } from './catalog/route.js';
 import { chatRoutes } from './chat/route.js';
 import { ExecutionEngine } from './execution/engine.js';
+import { createUsageQueue } from './metering/queue.js';
+import { QueueUsageRecorder } from './metering/recorder.js';
+import { SpillFile } from './metering/spill.js';
 import { providerFetch } from './providers/fetch.js';
 import { CredentialResolver, keyProviderFromConfig } from './credentials/service.js';
 import { AnthropicAdapter } from './providers/anthropic.js';
@@ -75,6 +78,15 @@ const providers = new ProviderRegistry(
 );
 const credentials = new CredentialResolver(db, keyProviderFromConfig(config));
 
+const usageQueue = createUsageQueue(config.REDIS_URL, {
+  attempts: config.USAGE_JOB_ATTEMPTS,
+  backoffMs: config.USAGE_JOB_BACKOFF_MS,
+});
+const usageRecorder = new QueueUsageRecorder(usageQueue, new SpillFile(config.USAGE_SPILL_PATH), {
+  warn: (obj, msg) => app.log.warn(obj, msg),
+  error: (obj, msg) => app.log.error(obj, msg),
+});
+
 const app = buildApp({
   logLevel: config.LOG_LEVEL,
   trustProxy: config.TRUST_PROXY,
@@ -99,6 +111,7 @@ const app = buildApp({
         idleTimeoutMs: config.STREAM_IDLE_TIMEOUT_MS,
         heartbeatMs: config.STREAM_HEARTBEAT_MS,
       },
+      usage: usageRecorder,
       deadline: {
         defaultMs: config.REQUEST_DEADLINE_DEFAULT_MS,
         maxMs: config.REQUEST_DEADLINE_MAX_MS,
@@ -114,6 +127,16 @@ redis.connect().catch(() => {
   // Reported through /readyz; ioredis keeps retrying in the background.
 });
 catalog.start();
+usageQueue.on('error', (err) => app.log.warn({ err: err.message }, 'usage queue error'));
+// Replay events spilled while Redis was unreachable: now, and periodically afterwards.
+const replaySpill = () =>
+  usageRecorder
+    .replaySpill()
+    .then((n) => n > 0 && app.log.info({ replayed: n }, 'replayed spilled usage events'))
+    .catch((err: unknown) => app.log.warn({ err }, 'usage spill replay failed; will retry'));
+void replaySpill();
+const spillTimer = setInterval(replaySpill, 60_000);
+spillTimer.unref();
 subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
   app.log.warn({ err }, 'auth invalidation subscription failed; relying on cache TTL'),
 );
@@ -121,7 +144,10 @@ subscribeToKeyInvalidations(subscriber, authenticator).catch((err: unknown) =>
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');
   catalog.stop();
+  clearInterval(spillTimer);
   await app.close();
+  await usageRecorder.flush();
+  await usageQueue.close();
   await Promise.allSettled([pool.end(), redis.quit(), subscriber.quit()]);
   process.exit(0);
 }

@@ -202,6 +202,9 @@ export const usageEvents = pgTable(
     requestId: text('request_id').notNull(),
     tenantId: uuid('tenant_id').notNull(),
     apiKeyId: uuid('api_key_id').notNull(),
+    /** The model the client asked for: a concrete model or a routing policy such as `auto`. */
+    requestedModel: text('requested_model').notNull().default(''),
+    /** The model that served the request, or the last one attempted when every attempt failed. */
     modelId: text('model_id').notNull(),
     provider: text('provider').notNull(),
     priceId: uuid('price_id'),
@@ -210,10 +213,14 @@ export const usageEvents = pgTable(
     outputTokens: integer('output_tokens').notNull().default(0),
     cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
     costMicros: micros('cost_micros').notNull(),
-    usageSource: text('usage_source', { enum: ['provider', 'estimated'] }).notNull(),
-    status: text('status', { enum: ['success', 'error', 'aborted'] }).notNull(),
+    /** `none` when no tokens were billed (e.g. every attempt failed before a response). */
+    usageSource: text('usage_source', { enum: ['provider', 'estimated', 'none'] }).notNull(),
+    status: text('status', { enum: ['success', 'error', 'partial', 'client_cancelled'] }).notNull(),
     attempts: smallint('attempts').notNull().default(1),
+    fallbackUsed: boolean('fallback_used').notNull().default(false),
     latencyMs: integer('latency_ms'),
+    /** Time to first streamed event; null for non-streaming requests. */
+    ttftMs: integer('ttft_ms'),
     routeReason: text('route_reason'),
     createdAt: createdAt(),
   },
@@ -223,8 +230,14 @@ export const usageEvents = pgTable(
     uniqueIndex('usage_events_request_uq').on(t.requestId, t.createdAt),
     index('usage_events_tenant_created_idx').on(t.tenantId, t.createdAt),
     check('usage_events_cost_check', sql`${t.costMicros} >= 0`),
-    check('usage_events_usage_source_check', sql`${t.usageSource} in ('provider', 'estimated')`),
-    check('usage_events_status_check', sql`${t.status} in ('success', 'error', 'aborted')`),
+    check(
+      'usage_events_usage_source_check',
+      sql`${t.usageSource} in ('provider', 'estimated', 'none')`,
+    ),
+    check(
+      'usage_events_status_check',
+      sql`${t.status} in ('success', 'error', 'partial', 'client_cancelled')`,
+    ),
   ],
 );
 

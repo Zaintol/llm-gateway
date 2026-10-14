@@ -1,9 +1,11 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { asc } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { modelPrices, models, routingPolicies } from '../db/schema.js';
 
 export type ModelPrice = {
   id: string;
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
   inputPerMtokMicros: bigint;
   outputPerMtokMicros: bigint;
   cachedInputPerMtokMicros: bigint | null;
@@ -20,9 +22,22 @@ export type CatalogModel = {
   latencyTier: 'fast' | 'standard' | 'slow';
   enabled: boolean;
   createdAt: Date;
-  /** The currently effective price; null only if the catalog was never seeded with one. */
+  /** The price in effect when the catalog was loaded; null only if none is in effect. */
   price: ModelPrice | null;
+  /** Every price row, oldest first. Use priceAt() to cost a request by its start time. */
+  prices: ModelPrice[];
 };
+
+/** The price row in effect at `at`: effective_from <= at < effective_to. */
+export function priceAt(model: Pick<CatalogModel, 'prices'>, at: Date): ModelPrice | null {
+  const t = at.getTime();
+  return (
+    model.prices.find(
+      (p) =>
+        p.effectiveFrom.getTime() <= t && (p.effectiveTo === null || t < p.effectiveTo.getTime()),
+    ) ?? null
+  );
+}
 
 export type RoutingPolicy = {
   id: string;
@@ -76,40 +91,48 @@ export class PgCatalog implements ModelCatalog {
   }
 
   async refresh(): Promise<void> {
-    const rows = await this.db
-      .select({ model: models, price: modelPrices })
-      .from(models)
-      .leftJoin(
-        modelPrices,
-        and(eq(modelPrices.modelId, models.id), isNull(modelPrices.effectiveTo)),
-      );
-    const policies = await this.db.select().from(routingPolicies);
+    const [modelRows, priceRows, policies] = await Promise.all([
+      this.db.select().from(models),
+      this.db.select().from(modelPrices).orderBy(asc(modelPrices.effectiveFrom)),
+      this.db.select().from(routingPolicies),
+    ]);
+    const pricesByModel = new Map<string, ModelPrice[]>();
+    for (const p of priceRows) {
+      const list = pricesByModel.get(p.modelId) ?? [];
+      list.push({
+        id: p.id,
+        effectiveFrom: p.effectiveFrom,
+        effectiveTo: p.effectiveTo,
+        inputPerMtokMicros: p.inputPricePerMtokMicros,
+        outputPerMtokMicros: p.outputPricePerMtokMicros,
+        cachedInputPerMtokMicros: p.cachedInputPricePerMtokMicros,
+      });
+      pricesByModel.set(p.modelId, list);
+    }
+    const now = new Date();
     this.snapshot = new StaticCatalog(
-      rows.map(({ model, price }) => ({
-        id: model.id,
-        provider: model.provider,
-        upstreamModel: model.upstreamModelName,
-        contextWindow: model.contextWindow,
-        maxOutputTokens: model.maxOutputTokens,
-        capabilities: {
-          tools: model.supportsTools,
-          vision: model.supportsVision,
-          jsonMode: model.supportsJsonMode,
-          streaming: model.supportsStreaming,
-        },
-        qualityTier: model.qualityTier,
-        latencyTier: model.latencyTier,
-        enabled: model.enabled,
-        createdAt: model.createdAt,
-        price: price
-          ? {
-              id: price.id,
-              inputPerMtokMicros: price.inputPricePerMtokMicros,
-              outputPerMtokMicros: price.outputPricePerMtokMicros,
-              cachedInputPerMtokMicros: price.cachedInputPricePerMtokMicros,
-            }
-          : null,
-      })),
+      modelRows.map((model) => {
+        const prices = pricesByModel.get(model.id) ?? [];
+        return {
+          id: model.id,
+          provider: model.provider,
+          upstreamModel: model.upstreamModelName,
+          contextWindow: model.contextWindow,
+          maxOutputTokens: model.maxOutputTokens,
+          capabilities: {
+            tools: model.supportsTools,
+            vision: model.supportsVision,
+            jsonMode: model.supportsJsonMode,
+            streaming: model.supportsStreaming,
+          },
+          qualityTier: model.qualityTier,
+          latencyTier: model.latencyTier,
+          enabled: model.enabled,
+          createdAt: model.createdAt,
+          prices,
+          price: priceAt({ prices }, now),
+        };
+      }),
       policies.map((p) => ({
         id: p.id,
         description: p.description,

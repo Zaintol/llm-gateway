@@ -9,6 +9,7 @@ import { ProviderRegistry } from '../../src/providers/registry.js';
 import type { ProviderResult } from '../../src/providers/types.js';
 import {
   FakeAdapter,
+  InMemoryRecorder,
   StaticCredentials,
   cannedResult,
   catalogModel,
@@ -75,11 +76,14 @@ const catalog = new StaticCatalog(
 let app: FastifyInstance;
 afterEach(() => app?.close());
 
+let recorder: InMemoryRecorder;
+
 function make(
   adapters: FakeAdapter[],
   engine = new ExecutionEngine({ sleep: async () => {} }),
   tenantSettings: Record<string, unknown> = {},
 ) {
+  recorder = new InMemoryRecorder();
   const fakes = fakeAuth();
   const { key } = fakes.store.add({ tenantSettings });
   app = buildApp({
@@ -93,6 +97,7 @@ function make(
         catalog,
         credentials: new StaticCredentials(),
         engine,
+        usage: recorder,
       }),
     ],
   });
@@ -302,5 +307,50 @@ describe('ExecutionEngine.backoff', () => {
     });
     expect([0, 1, 2, 3, 4].map((r) => max.backoff(r))).toEqual([199, 399, 799, 1599, 1999]);
     expect(new ExecutionEngine({ random: () => 0 }).backoff(3)).toBe(0);
+  });
+});
+
+describe('metering of executed requests (GW-7.1)', () => {
+  it('records a fallback-served request with its attempts and cost', async () => {
+    const res = await make([
+      scripted('openai', [{ kind: 'provider_error', status: 503 }]),
+      scripted('anthropic', ['ok']),
+    ])({ model: 'gw/resilient' });
+    expect(res.statusCode).toBe(200);
+    const [event] = await recorder.waitFor(1);
+    expect(event).toMatchObject({
+      requestId: res.headers['x-request-id'],
+      requestedModel: 'gw/resilient',
+      modelId: 'anthropic/claude',
+      provider: 'anthropic',
+      status: 'success',
+      attempts: 4,
+      fallbackUsed: true,
+      inputTokens: 3,
+      outputTokens: 1,
+      usageSource: 'provider',
+      routeReason: 'policy:gw/resilient',
+    });
+    // 3 input * 0.05 USD/Mtok + 1 output * 0.20 USD/Mtok = 0.35 micro-USD, rounded to 0
+    expect(event!.costMicros).toBe('0');
+  });
+
+  it('records a failed request with no tokens and no cost', async () => {
+    await make([scripted('openai', [{ kind: 'provider_error', status: 500 }])])({
+      model: 'openai/gpt',
+    });
+    const [event] = await recorder.waitFor(1);
+    expect(event).toMatchObject({
+      status: 'error',
+      modelId: 'openai/gpt',
+      attempts: 3,
+      usageSource: 'none',
+      costMicros: '0',
+    });
+  });
+
+  it('does not meter requests rejected before reaching a provider', async () => {
+    await make([scripted('openai', ['ok'])])({ model: 'openai/gpt', max_tokens: 40_000 });
+    expect(recorder.events).toHaveLength(0);
   });
 });

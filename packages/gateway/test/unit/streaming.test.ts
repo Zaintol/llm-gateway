@@ -9,7 +9,7 @@ import { ExecutionEngine } from '../../src/execution/engine.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { OpenAiCompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { ProviderRegistry } from '../../src/providers/registry.js';
-import { StaticCredentials, catalogModel, fakeAuth } from '../support/fakes.js';
+import { InMemoryRecorder, StaticCredentials, catalogModel, fakeAuth } from '../support/fakes.js';
 
 /** OpenAI SDK / raw fetch -> gateway -> real adapters -> mock provider, all over HTTP. */
 let upstream: FastifyInstance;
@@ -18,6 +18,16 @@ let upstreamUrl: string;
 let gatewayUrl: string;
 let apiKey: string;
 let client: OpenAI;
+const recorder = new InMemoryRecorder();
+const eventFor = async (requestId: string | null) => {
+  const started = Date.now();
+  while (Date.now() - started < 2000) {
+    const found = recorder.events.find((e) => e.requestId === requestId);
+    if (found) return found;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return undefined;
+};
 
 const model = (id: string, upstreamModel: string) =>
   catalogModel({ id, provider: id.split('/')[0]!, upstreamModel });
@@ -78,6 +88,7 @@ beforeAll(async () => {
         }),
         engine: new ExecutionEngine({ sleep: async () => {}, firstTokenTimeoutMs: 300 }),
         stream: { idleTimeoutMs: 300, heartbeatMs: 10_000 },
+        usage: recorder,
       }),
     ],
   });
@@ -154,6 +165,14 @@ describe('streaming (GW-2.6)', () => {
       total_tokens: last.usage!.prompt_tokens + last.usage!.completion_tokens,
     });
     expect(chunks.slice(0, -1).every((c) => c.usage === null)).toBe(true);
+    const metered = recorder.events.at(-1)!;
+    expect(metered).toMatchObject({
+      status: 'success',
+      usageSource: 'provider',
+      inputTokens: last.usage!.prompt_tokens,
+      outputTokens: last.usage!.completion_tokens,
+    });
+    expect(metered.ttftMs).not.toBeNull();
   });
 
   it('falls back before the first chunk, so the client sees one uninterrupted stream', async () => {
@@ -185,6 +204,12 @@ describe('streaming (GW-2.6)', () => {
     });
     expect(events.at(-1)).toBe('[DONE]');
     expect(await upstreamRequests()).toHaveLength(1);
+    expect(await eventFor(headers.get('x-request-id'))).toMatchObject({
+      status: 'partial',
+      usageSource: 'estimated',
+      outputTokens: expect.any(Number),
+    });
+    expect((await eventFor(headers.get('x-request-id')))!.outputTokens).toBeGreaterThan(0);
   });
 
   it('aborts the upstream request within 1 second when the client disconnects', async () => {
@@ -214,6 +239,9 @@ describe('streaming (GW-2.6)', () => {
     }
     expect(recorded?.aborted).toBe(true);
     expect(recorded!.abortedAt! - disconnectedAt).toBeLessThan(1000);
+    const event = await eventFor(res.headers.get('x-request-id'));
+    expect(event).toMatchObject({ status: 'client_cancelled', usageSource: 'estimated' });
+    expect(event!.outputTokens).toBeGreaterThan(0);
   });
 });
 

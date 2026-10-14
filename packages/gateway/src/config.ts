@@ -67,6 +67,12 @@ const envSchema = z.object({
   LOCAL_MODELS_BASE_URL: z.url().optional(),
   /** When set, registers the `mock` provider (no credential needed). Used by tests and the demo. */
   MOCK_PROVIDER_BASE_URL: z.url().optional(),
+  /** Usage events that cannot be queued (Redis down) are appended here and replayed later. */
+  USAGE_SPILL_PATH: z.string().min(1).default('./data/usage-spill.ndjson'),
+  /** Worker retries per usage event before it lands in the dead-letter queue. */
+  USAGE_JOB_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  /** Exponential backoff base: 5s gives ~2.5 minutes of retries across 5 attempts. */
+  USAGE_JOB_BACKOFF_MS: z.coerce.number().int().positive().default(5_000),
   TRUST_PROXY: z
     .enum(['true', 'false'])
     .default('false')

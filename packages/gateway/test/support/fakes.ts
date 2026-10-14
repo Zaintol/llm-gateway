@@ -1,3 +1,4 @@
+import type { UsageEvent } from '../../src/metering/event.js';
 import type { CatalogModel } from '../../src/catalog/catalog.js';
 import type { ChatCompletionRequest } from '@gw/schema';
 import type { CredentialSource } from '../../src/chat/route.js';
@@ -127,6 +128,15 @@ export function cannedResult(model: string, content = 'hello'): ProviderResult {
   };
 }
 
+const PRICE_1 = {
+  id: 'price_1',
+  effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+  effectiveTo: null,
+  inputPerMtokMicros: 50_000n,
+  outputPerMtokMicros: 200_000n,
+  cachedInputPerMtokMicros: null,
+};
+
 export function catalogModel(overrides: Partial<CatalogModel> = {}): CatalogModel {
   return {
     id: 'mock/fast',
@@ -139,12 +149,23 @@ export function catalogModel(overrides: Partial<CatalogModel> = {}): CatalogMode
     latencyTier: 'fast' as const,
     enabled: true,
     createdAt: new Date('2026-01-01T00:00:00Z'),
-    price: {
-      id: 'price_1',
-      inputPerMtokMicros: 50_000n,
-      outputPerMtokMicros: 200_000n,
-      cachedInputPerMtokMicros: null,
-    },
+    price: PRICE_1,
+    prices: [PRICE_1],
     ...overrides,
   };
+}
+
+/** Collects usage events in memory instead of queueing them. */
+export class InMemoryRecorder {
+  readonly events: UsageEvent[] = [];
+  record(event: UsageEvent) {
+    this.events.push(event);
+  }
+  async waitFor(count: number, timeoutMs = 2000) {
+    const started = Date.now();
+    while (this.events.length < count && Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return this.events;
+  }
 }
