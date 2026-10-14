@@ -4,3 +4,4 @@ coverage/
 packages/gateway/drizzle/meta/
 PLAN.md
 .next/
+docs/api/

@@ -12,7 +12,9 @@
     "format": "prettier --write .",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "test:integration": "pnpm -r test:integration"
+    "test:integration": "pnpm -r test:integration",
+    "docs:api": "node --conditions=@gw/source --import tsx packages/gateway/src/docs/generate.ts",
+    "docs:check": "node --conditions=@gw/source --import tsx packages/gateway/src/docs/generate.ts --check"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
@@ -22,6 +24,7 @@
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.2",
     "vitest": "^5.0.4"
